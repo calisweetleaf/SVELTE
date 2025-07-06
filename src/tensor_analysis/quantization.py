@@ -5,6 +5,7 @@ Quantization scheme identification and dequantization simulation for SVELTE Fram
 import numpy as np
 from typing import Dict, Any
 import warnings
+import scipy.signal as signal
 
 class QuantizationReconstructor:
     def __init__(self, quantization_info: Dict[str, Any]):
@@ -655,7 +656,6 @@ class QuantizationReconstructor:
      # If original tensor is available, calculate direct comparison metrics
      if original_tensor is not None and tensor.shape == original_tensor.shape:
       # Calculate Mean Squared Error
-       "expected_peaks": expected_pe
       mse = np.mean((tensor - original_tensor) ** 2)
       metrics["mse"] = float(mse)
       
@@ -710,3 +710,34 @@ class QuantizationReconstructor:
         
       except Exception as e:
        metrics["ssim_error"] = str(e)
+
+     return metrics
+
+    def _estimate_precision_loss(
+        self, tensor: np.ndarray, original: np.ndarray | None, scheme_data: Dict[str, Any]
+    ) -> float:
+        """Estimate precision loss between quantized and original tensors."""
+        if original is None or tensor.shape != original.shape:
+            return 0.0
+        diff = tensor.astype(float) - original.astype(float)
+        return float(np.mean(np.abs(diff)))
+
+    def _frequency_domain_analysis(self, tensor: np.ndarray) -> Dict[str, Any]:
+        """Return simple frequency domain statistics."""
+        spectrum = np.fft.fftn(tensor.astype(float))
+        mag = np.abs(spectrum)
+        return {
+            "max": float(np.max(mag)),
+            "mean": float(np.mean(mag)),
+        }
+
+    def _generate_recommendations(self, results: Dict[str, Any]) -> list:
+        """Generate basic recommendations based on analysis results."""
+        recs = []
+        if results.get("confidence", 0) < 0.5:
+            recs.append("Low confidence in quantization analysis")
+        return recs
+
+    def _calculate_confidence(self, results: Dict[str, Any]) -> float:
+        """Compute a naive confidence metric."""
+        return 1.0 - min(1.0, results.get("metrics", {}).get("mse", 0))

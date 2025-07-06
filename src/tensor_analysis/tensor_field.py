@@ -139,6 +139,12 @@ class TensorField:
   self.index = TensorIndex()
   self.cache = {}
   self._modified = False
+
+ def __contains__(self, key: str) -> bool:
+  return key in self.tensors
+
+ def __getitem__(self, key: str) -> np.ndarray:
+  return self.tensors[key]
   
  def add_tensor(self, name: str, tensor: np.ndarray, metadata: Optional[TensorMetadata] = None) -> None:
   """

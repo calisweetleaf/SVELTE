@@ -5,6 +5,7 @@ Extracts tensor data, quantization schemes, and metadata.
 """
 import struct
 from typing import Dict, Any, Tuple
+import numpy as np
 from src.utils.file_io import read_binary_file, FileIOException
 import argparse
 
