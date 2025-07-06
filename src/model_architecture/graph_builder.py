@@ -105,40 +105,44 @@ class ArchitectureGraphBuilder:
    ValueError: If the metadata format is invalid or missing required fields
   """
   try:
-   if "layers" not in self.metadata:
-    raise ValueError("Metadata must include 'layers' information")
-    
-   logger.info(f"Building architecture graph with {len(self.metadata['layers'])} layers")
-   
-   # Add layers as nodes
-   for layer_data in self.metadata["layers"]:
-    self._add_layer_node(layer_data)
+    if "layers" not in self.metadata:
+        raise ValueError("Metadata must include 'layers' information")
+
+    logger.info(
+        f"Building architecture graph with {len(self.metadata['layers'])} layers"
+    )
+
+    # Add layers as nodes
+    for layer_data in self.metadata["layers"]:
+        self._add_layer_node(layer_data)
    
    # Add connections as edges
-   if "connections" in self.metadata:
-    for connection in self.metadata["connections"]:
-     self._add_connection_edge(connection)
-   else:
-    # If connections aren't explicitly defined, try to infer sequential connections
-    self._infer_sequential_connections()
+    if "connections" in self.metadata:
+        for connection in self.metadata["connections"]:
+            self._add_connection_edge(connection)
+    else:
+        # If connections aren't explicitly defined, try to infer sequential connections
+        self._infer_sequential_connections()
    
    # Validate the graph structure
-   self._validate_graph()
+    self._validate_graph()
+
+    # Analyze the graph to identify connection patterns
+    self._analyze_connection_patterns()
    
-   # Analyze the graph to identify connection patterns
-   self._analyze_connection_patterns()
-   
-   # Calculate graph metrics
-   self._calculate_metrics()
-   
-   self._is_built = True
-   logger.info(f"Architecture graph successfully built with {self.graph.number_of_nodes()} nodes and {self.graph.number_of_edges()} edges")
-   
-   return self.graph
-   
+    # Calculate graph metrics
+    self._calculate_metrics()
+
+    self._is_built = True
+    logger.info(
+        f"Architecture graph successfully built with {self.graph.number_of_nodes()} nodes and {self.graph.number_of_edges()} edges"
+    )
+
+    return self.graph
+
   except Exception as e:
-   logger.error(f"Error building architecture graph: {str(e)}")
-   raise
+    logger.error(f"Error building architecture graph: {str(e)}")
+    raise
 
  def get_graph(self) -> nx.DiGraph:
   """
@@ -155,7 +159,7 @@ class ArchitectureGraphBuilder:
    self.build_graph()
   return self.graph
 
- def _add_layer_node(self, layer_data: Dict[str, Any]) -> None:
+ def _add_layer_node(self, layer_data: Dict[str, Any] | str) -> None:
   """
   Add a layer as a node to the graph with its attributes.
   
@@ -165,6 +169,9 @@ class ArchitectureGraphBuilder:
   Raises:
    ValueError: If required layer data is missing
   """
+  if isinstance(layer_data, str):
+   layer_data = {"id": layer_data, "type": "generic"}
+
   if "id" not in layer_data or "type" not in layer_data:
    raise ValueError("Layer data must include 'id' and 'type' fields")
    
@@ -234,17 +241,19 @@ class ArchitectureGraphBuilder:
   """
   layers = self.metadata.get("layers", [])
   for i in range(len(layers) - 1):
-   source_id = layers[i]["id"]
-   target_id = layers[i + 1]["id"]
-   
+   src = layers[i]
+   tgt = layers[i + 1]
+   source_id = src["id"] if isinstance(src, dict) else src
+   target_id = tgt["id"] if isinstance(tgt, dict) else tgt
+
    self.graph.add_edge(
     source_id,
     target_id,
     weight=1.0,
     connection_type=ConnectionType.SEQUENTIAL.name,
-    inferred=True
+    inferred=True,
    )
-   
+
   logger.info(f"Inferred {len(layers) - 1} sequential connections")
 
  def _validate_graph(self) -> None:

@@ -194,24 +194,30 @@ class EntropyAnalysisModule:
             self.logger.warning("Empty data vector after filtering NaN/Inf values")
             return 0.0
             
-        hist, _ = np.histogram(data, bins=bins, density=True)
-        hist = hist[hist > 0]  # Remove zero probabilities
-        
-        if hist.size == 0:
+        hist, _ = np.histogram(data, bins=bins, density=False)
+        total = np.sum(hist)
+        if total == 0:
             return 0.0
-            
+        p = hist / total
+        p = p[p > 0]
+
+        if p.size == 0:
+            return 0.0
+
         if method == "shannon":
-            return -np.sum(hist * np.log2(hist))
+            return -np.sum(p * np.log2(p))
             
         elif method == "renyi":
             if alpha <= 0 or alpha == 1:
-                raise ValueError(f"Alpha must be positive and not equal to 1 for Rényi entropy, got {alpha}")
-            return (1 / (1 - alpha)) * np.log2(np.sum(hist ** alpha))
+                raise ValueError(
+                    f"Alpha must be positive and not equal to 1 for Rényi entropy, got {alpha}"
+                )
+            return (1 / (1 - alpha)) * np.log2(np.sum(p ** alpha))
             
         elif method == "tsallis":
             if alpha <= 0:
                 raise ValueError(f"Alpha must be positive for Tsallis entropy, got {alpha}")
-            return (1 / (alpha - 1)) * (1 - np.sum(hist ** alpha))
+            return (1 / (alpha - 1)) * (1 - np.sum(p ** alpha))
             
         elif method == "differential":
             # Kozachenko-Leonenko estimator for differential entropy
@@ -225,7 +231,7 @@ class EntropyAnalysisModule:
             return 0.0
             
         elif method == "scipy":
-            return scipy_entropy(hist, base=2)
+            return scipy_entropy(p, base=2)
             
         else:
             raise ValueError(f"Unknown entropy method: {method}")

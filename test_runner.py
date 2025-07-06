@@ -51,13 +51,13 @@ def test_attention_topology():
             print(f"✗ Statistics computation failed: {e}")
         
         print("\nAll tests completed!")
-        return True
+        assert True
         
     except Exception as e:
         print(f"✗ Test failed: {e}")
         import traceback
         traceback.print_exc()
-        return False
+        assert False
 
 if __name__ == "__main__":
     success = test_attention_topology()
