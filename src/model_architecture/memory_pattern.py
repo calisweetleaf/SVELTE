@@ -83,6 +83,7 @@ class MemoryPatternRecognitionSystem:
   self.motifs = []
   self.similarity_matrix = None
   self.layer_groups = defaultdict(list)
+  self.logger = logging.getLogger(__name__) # Added instance logger
   
   # Track metrics for analysis quality
   self.metrics = {
@@ -282,7 +283,7 @@ class MemoryPatternRecognitionSystem:
    eps=1.0-self.threshold,
    min_samples=self.min_pattern_size,
    metric="precomputed"
-  ).fit(1.0 - self.similarity_matrix)  # Convert similarity to distance
+  ).fit(1.0 - np.clip(self.similarity_matrix, -1.0, 1.0))  # Convert similarity to distance, ensure non-negative
   
   labels = clustering.labels_
   

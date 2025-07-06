@@ -5,997 +5,333 @@ Transforms tensor patterns into symbolic representations and extracts computatio
 author: Morpheus
 date: 2025-05-01
 description: This module provides a system for transforming tensor patterns into symbolic representations and extracting computational grammars.
-version: 0.1.0
+version: 0.1.3 # Updated version
 ID: 002
-SHA-256: abcdef1234567890abcdef1234567890abcdef123456
+SHA-256: abcdef1234567890abcdef1234567890abcdef123456 # Placeholder
 """
 import numpy as np
-from typing import Dict, Any
+from typing import Dict, Any, List, Tuple, Optional, Union, Callable # Consolidated typing imports
 from collections import Counter, defaultdict
 import logging
-import argparse
+# argparse will be imported locally in main()
 
 class SymbolicMappingModule:
     def __init__(self, entropy_maps: Dict[str, float], tensor_field: Dict[str, np.ndarray]):
+        if not isinstance(entropy_maps, dict) or not all(isinstance(v, (float, int, np.number)) for v in entropy_maps.values()):
+            raise ValueError("entropy_maps must be a dictionary mapping strings to numbers (float/int)")
+        if not isinstance(tensor_field, dict) or not all(isinstance(v, np.ndarray) for v in tensor_field.values()):
+            raise ValueError("tensor_field must be a dictionary mapping strings to numpy arrays")
+
+        self.logger = logging.getLogger("SymbolicMappingModule")
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+            self.logger.setLevel(logging.INFO)
+
+        self.logger.info(f"Initializing with {len(entropy_maps)} entropy maps and {len(tensor_field)} tensor fields")
         self.entropy_maps = entropy_maps
         self.tensor_field = tensor_field
-        self.symbolic_patterns = {}
-        self.grammar = {}
-        def __init__(self, entropy_maps: Dict[str, float], tensor_field: Dict[str, np.ndarray]):
-         """
-         Initialize the SymbolicMappingModule with entropy maps and tensor field data.
-         
-         Parameters:
-         -----------
-         entropy_maps : Dict[str, float]
-          Mapping of tensor segment identifiers to their entropy values, 
-          quantifying information density and complexity.
-         tensor_field : Dict[str, np.ndarray]
-          Dictionary of named tensor arrays representing the computational space.
-          
-         Raises:
-         -------
-         ValueError: If inputs are invalid or incompatible.
-         """
-         # Input validation
-         if not isinstance(entropy_maps, dict) or not all(isinstance(v, float) for v in entropy_maps.values()):
-          raise ValueError("entropy_maps must be a dictionary mapping strings to floats")
-         
-         if not isinstance(tensor_field, dict) or not all(isinstance(v, np.ndarray) for v in tensor_field.values()):
-          raise ValueError("tensor_field must be a dictionary mapping strings to numpy arrays")
-          
-         # Initialize logger
-         self.logger = logging.getLogger("SymbolicMappingModule")
-         self.logger.info(f"Initializing with {len(entropy_maps)} entropy maps and {len(tensor_field)} tensor fields")
-         
-         # Store input data
-         self.entropy_maps = entropy_maps
-         self.tensor_field = tensor_field
-         
-         # Initialize data structures
-         self.symbolic_patterns = {}
-         self.grammar = {}
-         self.abstraction_hierarchy = {}
-         self.interpretability_scores = {}
-         
-         # Metadata for tracking processing state
-         self.processed_tensors = set()
-         self.processing_metadata = {
-          "timestamp": np.datetime64('now'),
-          "entropy_range": (min(entropy_maps.values()) if entropy_maps else 0,
-               max(entropy_maps.values()) if entropy_maps else 0),
-          "tensor_dimensions": {k: v.shape for k, v in tensor_field.items()}
-         }
-         
-         self.logger.debug(f"Initialization complete. Processing metadata: {self.processing_metadata}")
+        self.symbolic_patterns: Dict[str, List[str]] = {}
+        self.grammar: Dict[str, Any] = {}
+        self.abstraction_hierarchy: Dict[str, Dict[str, Any]] = {
+            "level_0": {"symbols": [], "relations": {}}, "level_1": {"symbols": [], "relations": {}}, "level_2": {"symbols": [], "relations": {}}}
+        self.interpretability_scores: Dict[str, Any] = {}
+        self.processed_tensors: set[str] = set()
+        self.processing_metadata: Dict[str, Any] = {
+            "timestamp": np.datetime64('now'),
+            "entropy_range": (min(entropy_maps.values()) if entropy_maps else 0.0, max(entropy_maps.values()) if entropy_maps else 0.0),
+            "tensor_dimensions": {k: v.shape for k, v in tensor_field.items()}}
+        self.logger.debug(f"Initialization complete. Processing metadata: {self.processing_metadata}")
 
-        def extract_grammar(self) -> Dict[str, Any]:
-         """
-         Infers a formal grammar (approximated as production rules) from the encoded symbolic patterns.
+    def extract_grammar(self) -> Dict[str, Any]:
+        if not self.symbolic_patterns:
+            self.logger.error("Cannot extract grammar: Symbolic patterns are empty. Run encode_symbolic first.")
+            raise ValueError("Symbolic patterns have not been generated. Run encode_symbolic first.")
+        try:
+            all_sequences: List[Tuple[str, ...]] = []
+            for key, pattern_data in self.symbolic_patterns.items():
+                if isinstance(pattern_data, (list, tuple)): all_sequences.append(tuple(str(s) for s in pattern_data))
+                elif isinstance(pattern_data, str): all_sequences.append(tuple(pattern_data.split()))
+                else: self.logger.warning(f"Unsupported pattern_data type for key {key}: {type(pattern_data)}")
 
-         This method analyzes the sequences of symbols derived from tensor patterns
-         to identify recurring structures and formulate production rules,
-         effectively building a computational grammar representing the underlying
-         operations or relationships within the tensor field.
+            if not all_sequences:
+                self.logger.warning("No valid sequences for grammar extraction.")
+                self.grammar = {"terminals": [], "non_terminals": ["S"], "production_rules": {"S": [[]]}}
+                return self.grammar
 
-         The process involves:
-         1. Identifying frequent subsequences (n-grams) within the symbolic patterns.
-         2. Abstracting these frequent subsequences into non-terminal symbols.
-         3. Defining production rules where non-terminals expand into terminals or other non-terminals.
-         4. Storing the resulting grammar (terminals, non-terminals, rules) in self.grammar.
+            ngram_counts: Counter[Tuple[str, ...]] = Counter()
+            terminals: set[str] = set()
+            for seq in all_sequences:
+                terminals.update(seq)
+                for n in [3, 2]:
+                    for i in range(len(seq) - n + 1): ngram_counts[tuple(seq[i:i+n])] += 1
 
-         Returns:
-         --------
-         Dict[str, Any]: The extracted grammar, containing rules, terminals, and non-terminals.
+            min_ngram_freq = max(2, int(0.05 * len(all_sequences))) if all_sequences else 2
+            frequent_ngrams = {ngram for ngram, count in ngram_counts.items() if count >= min_ngram_freq and len(ngram) > 1}
 
-         Raises:
-         -------
-         ValueError: If symbolic patterns have not been generated yet.
-         RuntimeError: If grammar extraction encounters unexpected issues.
-         """
-         logger = logging.getLogger("SymbolicMappingModule.extract_grammar")
-         if not self.symbolic_patterns:
-          logger.error("Cannot extract grammar: Symbolic patterns are empty. Run encode_symbolic first.")
-          raise ValueError("Symbolic patterns have not been generated. Run encode_symbolic first.")
+            non_terminal_map: Dict[Tuple[str,...], str] = {}
+            non_terminals_set: set[str] = set()
+            nt_counter = 1
+            for ngram in sorted(frequent_ngrams, key=lambda x: (-len(x), -ngram_counts[x])):
+                is_sub_nt = False # Basic overlap check placeholder
+                nt_symbol = f"N{nt_counter}"
+                non_terminal_map[ngram] = nt_symbol
+                non_terminals_set.add(nt_symbol)
+                nt_counter += 1
 
-         try:
-          # 1. Aggregate all symbolic sequences
-          all_sequences = []
-          for key, pattern_data in self.symbolic_patterns.items():
-           if isinstance(pattern_data, (list, tuple)):
-            all_sequences.append(tuple(pattern_data))
-           elif isinstance(pattern_data, str):
-            all_sequences.append(tuple(pattern_data.split()))
-           else:
-            logger.warning(f"Unsupported pattern_data type for key {key}: {type(pattern_data)}")
+            def replace_ngrams(seq_tuple: Tuple[str, ...]) -> Tuple[str, ...]:
+                seq_list = list(seq_tuple)
+                result_list = []
+                processed_indices = [False] * len(seq_list)
+                sorted_ngrams_to_replace = sorted(non_terminal_map.keys(), key=len, reverse=True)
+                for k_ngram in range(len(seq_list)):
+                    if processed_indices[k_ngram]: continue
+                    replaced_this_step = False
+                    for ngram_key in sorted_ngrams_to_replace:
+                        n_len = len(ngram_key)
+                        if k_ngram + n_len <= len(seq_list) and not any(processed_indices[k_ngram : k_ngram + n_len]):
+                            current_slice = tuple(seq_list[k_ngram : k_ngram + n_len])
+                            if current_slice == ngram_key:
+                                result_list.append(non_terminal_map[ngram_key])
+                                for l_idx in range(n_len): processed_indices[k_ngram + l_idx] = True
+                                replaced_this_step = True; break
+                    if not replaced_this_step:
+                        result_list.append(seq_list[k_ngram])
+                        processed_indices[k_ngram] = True
+                return tuple(result_list)
 
-          if not all_sequences:
-           logger.warning("No valid sequences found in symbolic patterns for grammar extraction.")
-           return {}
+            transformed_sequences = [replace_ngrams(seq) for seq in all_sequences]
+            production_rules: Dict[str, List[List[str]]] = defaultdict(list)
+            for ngram, nt_symbol in non_terminal_map.items():
+                if not production_rules[nt_symbol]: production_rules[nt_symbol].append(list(ngram))
 
-          # 2. Identify frequent n-grams (bigrams and trigrams)
-          ngram_counts = Counter()
-          terminals = set()
-          for seq in all_sequences:
-           terminals.update(seq)
-           for n in [2, 3]:
-            for i in range(len(seq) - n + 1):
-             ngram = tuple(seq[i:i+n])
-             ngram_counts[ngram] += 1
-
-          # 3. Select frequent n-grams as candidates for non-terminals
-          min_ngram_freq = max(2, int(0.05 * len(all_sequences)))  # Adaptive threshold
-          frequent_ngrams = {ngram for ngram, count in ngram_counts.items() if count >= min_ngram_freq}
-
-          # 4. Assign non-terminal symbols
-          non_terminal_map = {}
-          non_terminals = set()
-          nt_counter = 1
-          for ngram in sorted(frequent_ngrams, key=lambda x: (-len(x), -ngram_counts[x])):
-           nt_symbol = f"N{nt_counter}"
-           non_terminal_map[ngram] = nt_symbol
-           non_terminals.add(nt_symbol)
-           nt_counter += 1
-
-          # 5. Replace n-grams in sequences with non-terminals (greedy, longest-first)
-          def replace_ngrams(seq):
-           seq = list(seq)
-           i = 0
-           result = []
-           while i < len(seq):
-            replaced = False
-            for n in [3, 2]:
-             if i + n <= len(seq):
-              ngram = tuple(seq[i:i+n])
-              if ngram in non_terminal_map:
-               result.append(non_terminal_map[ngram])
-               i += n
-               replaced = True
-               break
-            if not replaced:
-             result.append(seq[i])
-             i += 1
-           return tuple(result)
-
-          transformed_sequences = [replace_ngrams(seq) for seq in all_sequences]
-
-          # 6. Build production rules
-          production_rules = defaultdict(list)
-          for ngram, nt_symbol in non_terminal_map.items():
-           production_rules[nt_symbol].append(list(ngram))
-          # Add rules for the top-level sequences
-          for seq in transformed_sequences:
-           production_rules["S"].append(list(seq))
-
-          # 7. Final grammar structure
-          grammar = {
-           "terminals": sorted(terminals),
-           "non_terminals": sorted(non_terminals | {"S"}),
-           "production_rules": dict(production_rules)
-          }
-          self.grammar = grammar
-          logger.info("Grammar extraction complete.")
-          return grammar
-
-         except Exception as e:
-          logger.exception("Unexpected error during grammar extraction.")
-          raise RuntimeError(f"Grammar extraction failed: {e}")
-
-        def encode_symbolic(self) -> Dict[str, Any]:
-         """
-         Converts numeric tensor patterns to symbolic notation and builds an abstraction hierarchy.
-         
-         This method performs multi-stage processing:
-         1. Tensor analysis: Identifies significant patterns, symmetries, and anomalies
-         2. Dimensional reduction: Projects high-dimensional patterns to lower-dimensional spaces
-         3. Symbolization: Maps numeric patterns to discrete symbolic representations
-         4. Abstraction: Constructs a hierarchical structure of abstraction levels
-         
-         Returns:
-         --------
-         Dict[str, Any]: The generated symbolic patterns and their metadata
-         
-         Raises:
-         -------
-         ValueError: If tensor data is invalid or inconsistent
-         RuntimeError: If symbolization process fails
-         """
-         self.logger.info("Beginning symbolic encoding process")
-         
-         # Initialize result containers
-         self.symbolic_patterns = {}
-         self.abstraction_hierarchy = {
-          "level_0": {"symbols": [], "relations": {}},
-          "level_1": {"symbols": [], "relations": {}},
-          "level_2": {"symbols": [], "relations": {}}
-         }
-         
-         # Symbol vocabulary - predetermined symbols for different pattern types
-         symbol_vocabulary = {
-          "periodic": ["α", "β", "γ", "δ", "ε"],
-          "chaotic": ["Ω", "Ψ", "Φ", "Θ", "Λ"],
-          "stable": ["A", "B", "C", "D", "E"],
-          "transient": ["X", "Y", "Z", "W", "V"],
-          "boundary": ["⊥", "⊤", "⊢", "⊣", "⊩"]
-         }
-         
-         try:
-          # STEP 1: Calculate tensor characteristics
-          tensor_characteristics = {}
-          for tensor_name, tensor in self.tensor_field.items():
-           # Skip already processed tensors
-           if tensor_name in self.processed_tensors:
-            continue
-            
-           self.logger.debug(f"Analyzing tensor: {tensor_name} with shape {tensor.shape}")
-           
-           # Extract tensor characteristics that inform pattern types
-           characteristics = {
-            "entropy": self.entropy_maps.get(tensor_name, 0.0),
-            "mean": float(np.mean(tensor)),
-            "std": float(np.std(tensor)),
-            "min": float(np.min(tensor)),
-            "max": float(np.max(tensor)),
-            "gradient_magnitude": float(np.mean(np.abs(np.gradient(tensor)[0]))),
-            "periodicity": self._measure_periodicity(tensor),
-            "sparsity": float(np.count_nonzero(tensor) / tensor.size)
-           }
-           
-           tensor_characteristics[tensor_name] = characteristics
-           self.processed_tensors.add(tensor_name)
-          
-          # STEP 2: Identify pattern types based on characteristics
-          pattern_assignments = {}
-          for tensor_name, chars in tensor_characteristics.items():
-           # Determine pattern type using heuristic rules
-           if chars["periodicity"] > 0.7:
-            pattern_type = "periodic"
-           elif chars["entropy"] > 0.8:
-            pattern_type = "chaotic"
-           elif chars["sparsity"] < 0.2:
-            pattern_type = "stable"
-           elif chars["gradient_magnitude"] > 0.5:
-            pattern_type = "transient"
-           else:
-            pattern_type = "boundary"
-            
-           pattern_assignments[tensor_name] = pattern_type
-          
-          # STEP 3: Symbol assignment and sequence generation
-          for tensor_name, pattern_type in pattern_assignments.items():
-           tensor = self.tensor_field[tensor_name]
-           chars = tensor_characteristics[tensor_name]
-           
-           # Choose symbols from appropriate vocabulary
-           vocabulary = symbol_vocabulary[pattern_type]
-           
-           # Segment the tensor and assign symbols
-           segments = self._segment_tensor(tensor)
-           symbolic_sequence = []
-           for segment in segments:
-            # Choose symbol based on segment characteristics
-            segment_intensity = np.mean(segment)
-            symbol_idx = min(int(segment_intensity * len(vocabulary)), len(vocabulary) - 1)
-            symbol = vocabulary[symbol_idx]
-            symbolic_sequence.append(symbol)
-           
-           # Store the symbolic pattern
-           self.symbolic_patterns[tensor_name] = symbolic_sequence
-           
-           # Place symbol in abstraction hierarchy
-           level = min(2, int(chars["entropy"] * 3))  # Determine abstraction level (0-2)
-           self.abstraction_hierarchy[f"level_{level}"]["symbols"].append(tensor_name)
-          
-          # STEP 4: Build relationships between symbols in abstraction hierarchy
-          for level_name, level_data in self.abstraction_hierarchy.items():
-           symbols = level_data["symbols"]
-           relations = level_data["relations"]
-           
-           # Find relations between symbols at this level
-           for i, sym1 in enumerate(symbols):
-            for sym2 in symbols[i+1:]:
-             similarity = self._calculate_symbol_similarity(
-              self.symbolic_patterns[sym1],
-              self.symbolic_patterns[sym2]
-             )
-             if similarity > 0.6:  # Only record significant relations
-              relations[f"{sym1}_{sym2}"] = {
-               "type": "similar",
-               "strength": similarity
-              }
-          
-          self.logger.info(f"Symbolic encoding complete. Generated {len(self.symbolic_patterns)} pattern sequences.")
-          return self.symbolic_patterns
-          
-         except Exception as e:
-          self.logger.exception("Error during symbolic encoding")
-          raise RuntimeError(f"Failed to encode symbolic patterns: {str(e)}")
-        
-        def _measure_periodicity(self, tensor: np.ndarray) -> float:
-         """
-         Measures the periodicity of a tensor using autocorrelation.
-         
-         Parameters:
-         -----------
-         tensor : np.ndarray
-          The tensor to analyze
-          
-         Returns:
-         --------
-         float: Periodicity score between 0 (aperiodic) and 1 (highly periodic)
-         """
-         # Flatten for autocorrelation calculation
-         flat = tensor.flatten()
-         
-         # Handle empty or constant tensors
-         if len(flat) < 2 or np.std(flat) < 1e-10:
-          return 0.0
-          
-         # Normalize the array
-         flat = (flat - np.mean(flat)) / np.std(flat)
-         
-         # Calculate autocorrelation
-         result = np.correlate(flat, flat, mode='full')
-         result = result[result.size//2:]
-         result /= result[0]  # Normalize
-         
-         # Calculate periodicity score based on autocorrelation peaks
-         if len(result) < 3:
-          return 0.0
-          
-         # Find peaks after the first element
-         peaks = []
-         for i in range(1, len(result)-1):
-          if result[i] > result[i-1] and result[i] > result[i+1] and result[i] > 0.2:
-           peaks.append((i, result[i]))
-         
-         if not peaks:
-          return 0.0
-          
-         # Calculate periodicity based on peak heights and regularity
-         peak_heights = [p[1] for p in peaks]
-         peak_positions = [p[0] for p in peaks]
-         
-         if len(peak_positions) < 2:
-          return float(peak_heights[0])
-         
-         # Calculate distances between consecutive peaks
-         peak_distances = [peak_positions[i+1] - peak_positions[i] for i in range(len(peak_positions)-1)]
-         
-         # Regularity of peak distances
-         distance_regularity = 1.0 - min(1.0, np.std(peak_distances) / np.mean(peak_distances))
-         
-         # Average peak height
-         avg_peak_height = np.mean(peak_heights)
-         
-         # Combined score
-         periodicity = (avg_peak_height * 0.7) + (distance_regularity * 0.3)
-         return float(np.clip(periodicity, 0.0, 1.0))
-
-        def _segment_tensor(self, tensor: np.ndarray) -> list:
-         """
-         Segments a tensor into meaningful regions for symbolization.
-         
-         Parameters:
-         -----------
-         tensor : np.ndarray
-          The tensor to segment
-          
-         Returns:
-         --------
-         list: List of tensor segments (also np.ndarray)
-         """
-         # Handle different dimensionality
-         if tensor.ndim == 1:
-          return self._segment_1d_tensor(tensor)
-         elif tensor.ndim == 2:
-          return self._segment_2d_tensor(tensor)
-         else:
-          # For higher dimensions, slice and process sequentially
-          segments = []
-          slices = []
-          
-          # Create slices for the first two dimensions
-          for i in range(min(5, tensor.shape[0])):  # Limit to avoid excessive computation
-           for j in range(min(5, tensor.shape[1])):
-            # Create a slice for higher dimensions
-            sliced_tensor = tensor[i, j, ...]
-            slices.append(sliced_tensor)
-          
-          # Process each slice
-          for slice_tensor in slices:
-           segments.extend(self._segment_2d_tensor(slice_tensor if slice_tensor.ndim >= 2 
-                      else slice_tensor.reshape(-1, 1)))
-          
-          return segments
-
-        def _segment_1d_tensor(self, tensor: np.ndarray) -> list:
-         """Helper to segment 1D tensors using adaptive windowing."""
-         # Determine segment size based on tensor length
-         segment_size = max(5, len(tensor) // 10)
-         segments = []
-         
-         # Create segments with overlap
-         for i in range(0, len(tensor), segment_size // 2):
-          end = min(i + segment_size, len(tensor))
-          segments.append(tensor[i:end])
-          if end == len(tensor):
-           break
-           
-         return segments
-
-        def _segment_2d_tensor(self, tensor: np.ndarray) -> list:
-         """Helper to segment 2D tensors using clustering or grid-based approach."""
-         if tensor.size > 10000:  # For large tensors, use grid-based approach
-          h, w = tensor.shape
-          grid_h, grid_w = max(1, h // 5), max(1, w // 5)
-          segments = []
-          
-          for i in range(0, h, grid_h):
-           for j in range(0, w, grid_w):
-            segment = tensor[i:min(i+grid_h, h), j:min(j+grid_w, w)]
-            segments.append(segment)
-            
-          return segments
-         else:
-          # For smaller tensors, use mean shift to find natural clusters
-          # Flatten the 2D tensor into feature vectors
-          h, w = tensor.shape
-          X = np.column_stack((
-           np.repeat(np.arange(h), w),
-           np.tile(np.arange(w), h),
-           tensor.flatten()
-          ))
-          
-          # Simple clustering alternative: quantile-based segmentation
-          # Segment based on intensity quantiles
-          flat_values = tensor.flatten()
-          quantiles = np.quantile(flat_values, [0.2, 0.4, 0.6, 0.8])
-          
-          segments = []
-          prev_threshold = float('-inf')
-          
-          for threshold in list(quantiles) + [float('inf')]:
-           mask = (flat_values > prev_threshold) & (flat_values <= threshold)
-           if np.any(mask):
-            # Reshape mask back to original dimensions and extract values
-            mask_2d = mask.reshape(tensor.shape)
-            # Create a segment with the masked values
-            segment = np.where(mask_2d, tensor, 0)
-            segments.append(segment)
-           prev_threshold = threshold
-           
-          return segments
-
-        def _calculate_symbol_similarity(self, seq1: list, seq2: list) -> float:
-         """
-         Calculate similarity between two symbolic sequences.
-         
-         Parameters:
-         -----------
-         seq1, seq2 : list
-          Symbolic sequences to compare
-          
-         Returns:
-         --------
-         float: Similarity score between 0 (dissimilar) and 1 (identical)
-         """
-         # Convert sequences to strings for easier comparison
-         str1 = ''.join(str(s) for s in seq1)
-         str2 = ''.join(str(s) for s in seq2)
-         
-         # Calculate Levenshtein distance
-         m, n = len(str1), len(str2)
-         if m == 0 or n == 0:
-          return 0.0 if max(m, n) > 0 else 1.0
-          
-         # Initialize distance matrix
-         d = [[0 for _ in range(n+1)] for _ in range(m+1)]
-         
-         # Fill distance matrix
-         for i in range(m+1):
-          d[i][0] = i
-         for j in range(n+1):
-          d[0][j] = j
-          
-         for j in range(1, n+1):
-          for i in range(1, m+1):
-           if str1[i-1] == str2[j-1]:
-            d[i][j] = d[i-1][j-1]
-           else:
-            d[i][j] = min(
-             d[i-1][j] + 1,    # deletion
-             d[i][j-1] + 1,    # insertion
-             d[i-1][j-1] + 1   # substitution
-            )
-         
-         # Convert distance to similarity score
-         max_len = max(m, n)
-         distance = d[m][n]
-         similarity = 1.0 - (distance / max_len if max_len > 0 else 0)
-         
-         return similarity
-
-        def verify_interpretability(self) -> Dict[str, Any]:
-         """
-         Evaluates the human-interpretability of the symbolic patterns and grammar.
-         
-         This method quantifies how understandable the symbolic representations are
-         using multiple metrics including complexity, consistency, and coherence.
-         It also validates the patterns against cognitive interpretability models.
-         
-         Returns:
-         --------
-         Dict[str, Any]: Detailed interpretability metrics and assessment report
-         
-         Raises:
-         -------
-         ValueError: If symbolic patterns or grammar haven't been generated
-         """
-         self.logger.info("Verifying interpretability of symbolic representations")
-         
-         if not self.symbolic_patterns:
-          raise ValueError("No symbolic patterns to verify. Run encode_symbolic first.")
-          
-         if not self.grammar:
-          self.logger.warning("Grammar not yet extracted. Interpretability assessment will be limited.")
-         
-         # Initialize interpretability metrics
-         interpretability_metrics = {
-          "symbol_entropy": {},           # Information density of symbols
-          "grammar_complexity": None,     # Complexity of grammar rules
-          "abstraction_coherence": {},    # Coherence of abstraction levels
-          "human_readability": {},        # Estimated human readability scores
-          "overall_score": None           # Aggregate interpretability score
-         }
-         
-         try:
-          # STEP 1: Calculate symbol entropy for each pattern
-          for tensor_name, symbolic_seq in self.symbolic_patterns.items():
-           # Count symbol frequencies
-           symbol_counts = Counter(symbolic_seq)
-           total_symbols = len(symbolic_seq)
-           
-           # Calculate entropy
-           entropy = 0.0
-           for symbol, count in symbol_counts.items():
-            p = count / total_symbols
-            entropy -= p * np.log2(p) if p > 0 else 0
-           
-           # Normalize entropy (0 to 1 scale)
-           unique_symbols = len(symbol_counts)
-           if unique_symbols > 1:
-            max_entropy = np.log2(unique_symbols)
-            normalized_entropy = entropy / max_entropy
-           else:
-            normalized_entropy = 0.0
-            
-           interpretability_metrics["symbol_entropy"][tensor_name] = normalized_entropy
-          
-          # STEP 2: Evaluate grammar complexity if available
-          if self.grammar:
-           # Count rule types
-           num_rules = sum(len(rules) for rules in self.grammar.get("production_rules", {}).values())
-           num_terminals = len(self.grammar.get("terminals", []))
-           num_non_terminals = len(self.grammar.get("non_terminals", []))
-           
-           # Calculate branching factor of rules
-           branching_factors = []
-           for lhs, rhs_list in self.grammar.get("production_rules", {}).items():
-            branching_factors.append(len(rhs_list))
-           
-           mean_branching = np.mean(branching_factors) if branching_factors else 0
-           
-           # Compose complexity metric
-           grammar_complexity = {
-            "rule_count": num_rules,
-            "terminal_count": num_terminals,
-            "non_terminal_count": num_non_terminals,
-            "mean_branching_factor": mean_branching,
-            "complexity_score": (0.4 * np.log2(1 + num_rules) / 10 + 
-                   0.3 * np.log2(1 + num_non_terminals) / 5 +
-                   0.3 * mean_branching / 5)
-           }
-           
-           interpretability_metrics["grammar_complexity"] = grammar_complexity
-          
-          # STEP 3: Assess abstraction coherence
-          for level_name, level_data in self.abstraction_hierarchy.items():
-           symbols = level_data.get("symbols", [])
-           relations = level_data.get("relations", {})
-           
-           if not symbols:
-            continue
-           
-           # Calculate connectivity density
-           max_relations = (len(symbols) * (len(symbols) - 1)) / 2
-           relation_density = len(relations) / max_relations if max_relations > 0 else 0
-           
-           # Calculate relation strength
-           relation_strengths = [rel.get("strength", 0) for rel in relations.values()]
-           mean_strength = np.mean(relation_strengths) if relation_strengths else 0
-           
-           coherence_score = relation_density * 0.5 + mean_strength * 0.5
-           interpretability_metrics["abstraction_coherence"][level_name] = coherence_score
-          
-          # STEP 4: Estimate human readability
-          for tensor_name, symbolic_seq in self.symbolic_patterns.items():
-           # Convert to string for analysis
-           symbolic_str = ''.join(str(s) for s in symbolic_seq)
-           
-           # Calculate readability metrics
-           sequence_length = len(symbolic_seq)
-           unique_ratio = len(set(symbolic_seq)) / sequence_length if sequence_length > 0 else 0
-           repetition_index = self._calculate_repetition_index(symbolic_seq)
-           
-           # Check for excessive length or complexity
-           length_penalty = max(0, min(1, (sequence_length - 20) / 100))
-           complexity_penalty = max(0, min(1, (unique_ratio - 0.3) * 2))
-           
-           # Calculate readability score (higher is more readable)
-           readability = 1.0 - (0.4 * length_penalty + 0.3 * complexity_penalty + 0.3 * (1 - repetition_index))
-           
-           interpretability_metrics["human_readability"][tensor_name] = readability
-           
-          # STEP 5: Calculate overall interpretability score
-          avg_entropy = np.mean(list(interpretability_metrics["symbol_entropy"].values()))
-          avg_coherence = np.mean(list(interpretability_metrics["abstraction_coherence"].values())) \
-              if interpretability_metrics["abstraction_coherence"] else 0.5
-          avg_readability = np.mean(list(interpretability_metrics["human_readability"].values()))
-          
-          grammar_complexity_score = interpretability_metrics["grammar_complexity"]["complexity_score"] \
-                 if interpretability_metrics["grammar_complexity"] else 0.5
-                 
-          # Weighted combination of metrics (lower entropy and complexity are better for interpretability)
-          overall_score = (0.25 * (1 - avg_entropy) + 
-                0.25 * (1 - grammar_complexity_score) + 
-                0.25 * avg_coherence +
-                0.25 * avg_readability)
-          
-          interpretability_metrics["overall_score"] = overall_score
-          
-          # Store results
-          self.interpretability_scores = interpretability_metrics
-          self.logger.info(f"Interpretability verification complete. Overall score: {overall_score:.3f}")
-          
-          return interpretability_metrics
-          
-         except Exception as e:
-          self.logger.exception("Error during interpretability verification")
-          raise RuntimeError(f"Failed to verify interpretability: {str(e)}")
-        
-        def _calculate_repetition_index(self, sequence: list) -> float:
-         """
-         Calculate a repetition index that measures pattern repetition in a sequence.
-         Higher values indicate more repetitive (and potentially more interpretable) patterns.
-         
-         Parameters:
-         -----------
-         sequence : list
-          Symbolic sequence to analyze
-          
-         Returns:
-         --------
-         float: Repetition index between 0 (no repetition) and 1 (highly repetitive)
-         """
-         if len(sequence) < 2:
-          return 0.0
-          
-         # Look for repeating patterns of different lengths
-         max_pattern_length = min(10, len(sequence) // 2)
-         repetition_scores = []
-         
-         for pattern_length in range(1, max_pattern_length + 1):
-          patterns = {}
-          
-          # Count occurrences of each pattern of current length
-          for i in range(len(sequence) - pattern_length + 1):
-           pattern = tuple(sequence[i:i+pattern_length])
-           patterns[pattern] = patterns.get(pattern, 0) + 1
-          
-          # Calculate repetition score for this pattern length
-          repeated_elements = sum(count - 1 for count in patterns.values() if count > 1)
-          total_possible = len(sequence) - pattern_length
-          
-          if total_possible > 0:
-           repetition_scores.append(repeated_elements / total_possible)
-         
-         # Return average repetition score across different pattern lengths
-         return np.mean(repetition_scores) if repetition_scores else 0.0
-         def encode_symbolic(self) -> Dict[str, Any]:
-          """
-          Converts numeric tensor patterns to symbolic notation and builds an abstraction hierarchy.
-          
-          This method performs multi-stage processing:
-          1. Tensor analysis: Identifies significant patterns, symmetries, and anomalies
-          2. Dimensional reduction: Projects high-dimensional patterns to lower-dimensional spaces
-          3. Symbolization: Maps numeric patterns to discrete symbolic representations
-          4. Abstraction: Constructs a hierarchical structure of abstraction levels
-          
-          Returns:
-          --------
-          Dict[str, Any]: The generated symbolic patterns and their metadata
-          
-          Raises:
-          -------
-          ValueError: If tensor data is invalid or inconsistent
-          RuntimeError: If symbolization process fails
-          """
-          self.logger.info("Beginning symbolic encoding process")
-          
-          # Initialize result containers
-          self.symbolic_patterns = {}
-          self.abstraction_hierarchy = {
-           "level_0": {"symbols": [], "relations": {}},
-           "level_1": {"symbols": [], "relations": {}},
-           "level_2": {"symbols": [], "relations": {}}
-          }
-          
-          # Symbol vocabulary - predetermined symbols for different pattern types
-          symbol_vocabulary = {
-           "periodic": ["α", "β", "γ", "δ", "ε"],
-           "chaotic": ["Ω", "Ψ", "Φ", "Θ", "Λ"],
-           "stable": ["A", "B", "C", "D", "E"],
-           "transient": ["X", "Y", "Z", "W", "V"],
-           "boundary": ["⊥", "⊤", "⊢", "⊣", "⊩"]
-          }
-          
-          try:
-           # STEP 1: Calculate tensor characteristics
-           tensor_characteristics = {}
-           for tensor_name, tensor in self.tensor_field.items():
-            # Skip already processed tensors
-            if tensor_name in self.processed_tensors:
-             continue
-             
-            self.logger.debug(f"Analyzing tensor: {tensor_name} with shape {tensor.shape}")
-            
-            # Extract tensor characteristics that inform pattern types
-            characteristics = {
-             "entropy": self.entropy_maps.get(tensor_name, 0.0),
-             "mean": float(np.mean(tensor)),
-             "std": float(np.std(tensor)),
-             "min": float(np.min(tensor)),
-             "max": float(np.max(tensor)),
-             "gradient_magnitude": float(np.mean(np.abs(np.gradient(tensor)[0]))),
-             "periodicity": self._measure_periodicity(tensor),
-             "sparsity": float(np.count_nonzero(tensor) / tensor.size)
-            }
-            
-            tensor_characteristics[tensor_name] = characteristics
-            self.processed_tensors.add(tensor_name)
-           
-           # STEP 2: Identify pattern types based on characteristics
-           pattern_assignments = {}
-           for tensor_name, chars in tensor_characteristics.items():
-            # Determine pattern type using heuristic rules
-            if chars["periodicity"] > 0.7:
-             pattern_type = "periodic"
-            elif chars["entropy"] > 0.8:
-             pattern_type = "chaotic"
-            elif chars["sparsity"] < 0.2:
-             pattern_type = "stable"
-            elif chars["gradient_magnitude"] > 0.5:
-             pattern_type = "transient"
+            unique_transformed_sequences = sorted(list(set(s for s in transformed_sequences if s)))
+            if unique_transformed_sequences:
+                production_rules["S"] = [list(seq) for seq in unique_transformed_sequences]
             else:
-             pattern_type = "boundary"
-             
-            pattern_assignments[tensor_name] = pattern_type
-           
-           # STEP 3: Symbol assignment and sequence generation
-           for tensor_name, pattern_type in pattern_assignments.items():
-            tensor = self.tensor_field[tensor_name]
-            chars = tensor_characteristics[tensor_name]
-            
-            # Choose symbols from appropriate vocabulary
-            vocabulary = symbol_vocabulary[pattern_type]
-            
-            # Segment the tensor and assign symbols
-            segments = self._segment_tensor(tensor)
-            symbolic_sequence = []
-            for segment in segments:
-             # Choose symbol based on segment characteristics
-             segment_intensity = np.mean(segment)
-             symbol_idx = min(int(segment_intensity * len(vocabulary)), len(vocabulary) - 1)
-             symbol = vocabulary[symbol_idx]
-             symbolic_sequence.append(symbol)
-            
-            # Store the symbolic pattern
-            self.symbolic_patterns[tensor_name] = symbolic_sequence
-            
-            # Place symbol in abstraction hierarchy
-            level = min(2, int(chars["entropy"] * 3))  # Determine abstraction level (0-2)
-            self.abstraction_hierarchy[f"level_{level}"]["symbols"].append(tensor_name)
-           
-           # STEP 4: Build relationships between symbols in abstraction hierarchy
-           for level_name, level_data in self.abstraction_hierarchy.items():
-            symbols = level_data["symbols"]
-            relations = level_data["relations"]
-            
-            # Find relations between symbols at this level
-            for i, sym1 in enumerate(symbols):
-             for sym2 in symbols[i+1:]:
-              similarity = self._calculate_symbol_similarity(
-               self.symbolic_patterns[sym1],
-               self.symbolic_patterns[sym2]
-              )
-              if similarity > 0.6:  # Only record significant relations
-               relations[f"{sym1}_{sym2}"] = {
-                "type": "similar",
-                "strength": similarity
-               }
-           
-           self.logger.info(f"Symbolic encoding complete. Generated {len(self.symbolic_patterns)} pattern sequences.")
-           return self.symbolic_patterns
-           
-          except Exception as e:
-           self.logger.exception("Error during symbolic encoding")
-           raise RuntimeError(f"Failed to encode symbolic patterns: {str(e)}")
+                 production_rules["S"] = [[]] if not all_sequences else [[str(s) for s in all_sequences[0]]]
+            final_non_terminals = sorted(list(non_terminals_set | ({"S"} if production_rules.get("S") else set())))
+            final_terminals = sorted(list(terminals))
+            self.grammar = {"terminals": final_terminals, "non_terminals": final_non_terminals, "production_rules": dict(production_rules)}
+            self.logger.info(f"Grammar extraction complete. Rules: {sum(len(r_list) for r_list in self.grammar['production_rules'].values())}, NTs: {len(final_non_terminals)}, Ts: {len(final_terminals)}")
+            return self.grammar
+        except Exception as e:
+            self.logger.exception("Unexpected error during grammar extraction.")
+            raise RuntimeError(f"Grammar extraction failed: {e}")
 
-         def verify_interpretability(self) -> Dict[str, Any]:
-          """
-          Evaluates the human-interpretability of the symbolic patterns and grammar.
-          
-          This method quantifies how understandable the symbolic representations are
-          using multiple metrics including complexity, consistency, and coherence.
-          It also validates the patterns against cognitive interpretability models.
-          
-          Returns:
-          --------
-          Dict[str, Any]: Detailed interpretability metrics and assessment report
-          
-          Raises:
-          -------
-          ValueError: If symbolic patterns or grammar haven't been generated
-          """
-          self.logger.info("Verifying interpretability of symbolic representations")
-          
-          if not self.symbolic_patterns:
-           raise ValueError("No symbolic patterns to verify. Run encode_symbolic first.")
-           
-          if not self.grammar:
-           self.logger.warning("Grammar not yet extracted. Interpretability assessment will be limited.")
-          
-          # Initialize interpretability metrics
-          interpretability_metrics = {
-           "symbol_entropy": {},           # Information density of symbols
-           "grammar_complexity": None,     # Complexity of grammar rules
-           "abstraction_coherence": {},    # Coherence of abstraction levels
-           "human_readability": {},        # Estimated human readability scores
-           "overall_score": None           # Aggregate interpretability score
-          }
-          
-          try:
-           # STEP 1: Calculate symbol entropy for each pattern
-           for tensor_name, symbolic_seq in self.symbolic_patterns.items():
-            # Count symbol frequencies
-            symbol_counts = Counter(symbolic_seq)
-            total_symbols = len(symbolic_seq)
-            
-            # Calculate entropy
-            entropy = 0.0
-            for symbol, count in symbol_counts.items():
-             p = count / total_symbols
-             entropy -= p * np.log2(p) if p > 0 else 0
-            
-            # Normalize entropy (0 to 1 scale)
-            unique_symbols = len(symbol_counts)
-            if unique_symbols > 1:
-             max_entropy = np.log2(unique_symbols)
-             normalized_entropy = entropy / max_entropy
-            else:
-             normalized_entropy = 0.0
-             
-            interpretability_metrics["symbol_entropy"][tensor_name] = normalized_entropy
-           
-           # STEP 2: Evaluate grammar complexity if available
-           if self.grammar:
-            # Count rule types
-            num_rules = sum(len(rules) for rules in self.grammar.get("production_rules", {}).values())
-            num_terminals = len(self.grammar.get("terminals", []))
-            num_non_terminals = len(self.grammar.get("non_terminals", []))
-            
-            # Calculate branching factor of rules
-            branching_factors = []
-            for lhs, rhs_list in self.grammar.get("production_rules", {}).items():
-             branching_factors.append(len(rhs_list))
-            
-            mean_branching = np.mean(branching_factors) if branching_factors else 0
-            
-            # Compose complexity metric
-            grammar_complexity = {
-             "rule_count": num_rules,
-             "terminal_count": num_terminals,
-             "non_terminal_count": num_non_terminals,
-             "mean_branching_factor": mean_branching,
-             "complexity_score": (0.4 * np.log2(1 + num_rules) / 10 + 
-                0.3 * np.log2(1 + num_non_terminals) / 5 +
-                0.3 * mean_branching / 5)
-            }
-            
-            interpretability_metrics["grammar_complexity"] = grammar_complexity
-           
-           # STEP 3: Assess abstraction coherence
-           for level_name, level_data in self.abstraction_hierarchy.items():
-            symbols = level_data.get("symbols", [])
-            relations = level_data.get("relations", {})
-            
-            if not symbols:
-             continue
-            
-            # Calculate connectivity density
-            max_relations = (len(symbols) * (len(symbols) - 1)) / 2
-            relation_density = len(relations) / max_relations if max_relations > 0 else 0
-            
-            # Calculate relation strength
-            relation_strengths = [rel.get("strength", 0) for rel in relations.values()]
-            mean_strength = np.mean(relation_strengths) if relation_strengths else 0
-            
-            coherence_score = relation_density * 0.5 + mean_strength * 0.5
-            interpretability_metrics["abstraction_coherence"][level_name] = coherence_score
-           
-           # STEP 4: Estimate human readability
-           for tensor_name, symbolic_seq in self.symbolic_patterns.items():
-            # Convert to string for analysis
-            symbolic_str = ''.join(str(s) for s in symbolic_seq)
-            
-            # Calculate readability metrics
-            sequence_length = len(symbolic_seq)
-            unique_ratio = len(set(symbolic_seq)) / sequence_length if sequence_length > 0 else 0
-            repetition_index = self._calculate_repetition_index(symbolic_seq)
-            
-            # Check for excessive length or complexity
-            length_penalty = max(0, min(1, (sequence_length - 20) / 100))
-            complexity_penalty = max(0, min(1, (unique_ratio - 0.3) * 2))
-            
-            # Calculate readability score (higher is more readable)
-            readability = 1.0 - (0.4 * length_penalty + 0.3 * complexity_penalty + 0.3 * (1 - repetition_index))
-            
-            interpretability_metrics["human_readability"][tensor_name] = readability
-            
-           # STEP 5: Calculate overall interpretability score
-           avg_entropy = np.mean(list(interpretability_metrics["symbol_entropy"].values()))
-           avg_coherence = np.mean(list(interpretability_metrics["abstraction_coherence"].values())) \
-            if interpretability_metrics["abstraction_coherence"] else 0.5
-           avg_readability = np.mean(list(interpretability_metrics["human_readability"].values()))
-           
-           grammar_complexity_score = interpretability_metrics["grammar_complexity"]["complexity_score"] \
-               if interpretability_metrics["grammar_complexity"] else 0.5
-               
-           # Weighted combination of metrics (lower entropy and complexity are better for interpretability)
-           overall_score = (0.25 * (1 - avg_entropy) + 
-              0.25 * (1 - grammar_complexity_score) + 
-              0.25 * avg_coherence +
-              0.25 * avg_readability)
-           
-           interpretability_metrics["overall_score"] = overall_score
-           
-           # Store results
-           self.interpretability_scores = interpretability_metrics
-           self.logger.info(f"Interpretability verification complete. Overall score: {overall_score:.3f}")
-           
-           return interpretability_metrics
-           
-          except Exception as e:
-           self.logger.exception("Error during interpretability verification")
-           raise RuntimeError(f"Failed to verify interpretability: {str(e)}")
+    def encode_symbolic(self) -> Dict[str, List[str]]:
+        self.logger.info("Beginning symbolic encoding process")
+        self.symbolic_patterns.clear(); self.abstraction_hierarchy = {"level_0": {"symbols": [], "relations": {}}, "level_1": {"symbols": [], "relations": {}}, "level_2": {"symbols": [], "relations": {}}}
+        symbol_vocabulary = {"periodic": ["α","β","γ","δ","ε"], "chaotic": ["Ω","Ψ","Φ","Θ","Λ"], "stable": ["A","B","C","D","E"], "transient": ["X","Y","Z","W","V"], "boundary": ["⊥","⊤","⊢","⊣","⊩"], "unknown": ["?","¿"]}
+        try:
+            tensor_characteristics = {}
+            for name, data in self.tensor_field.items():
+                self.logger.debug(f"Analyzing tensor: {name} with shape {data.shape}"); grad_mag_mean = 0.0
+                if data.ndim > 0 and data.size > 1:
+                    try:
+                        float_data = data.astype(np.float64) if not np.issubdtype(data.dtype, np.floating) else data
+                        grads = np.gradient(float_data)
+                        if not isinstance(grads, list): grads = [grads]
+                        sq_sum_grads = sum(g**2 for g in grads); grad_mag_mean = float(np.mean(np.sqrt(sq_sum_grads)))
+                    except Exception as e: self.logger.warning(f"Grad for {name} ({data.shape}): {e}")
+                chars = {"entropy": self.entropy_maps.get(name,0.5), "mean":np.mean(data) if data.size>0 else 0, "std":np.std(data) if data.size>0 else 0, "min":np.min(data) if data.size>0 else 0, "max":np.max(data) if data.size>0 else 0, "gradient_magnitude":grad_mag_mean, "periodicity":self._measure_periodicity(data), "sparsity":np.count_nonzero(data)/data.size if data.size>0 else 0}
+                tensor_characteristics[name] = {k:float(v) for k,v in chars.items()}
+            assignments = {}
+            for name,c in tensor_characteristics.items():
+                if c["periodicity"]>0.55: assignments[name]="periodic"
+                elif c["entropy"]>0.75 and c["gradient_magnitude"]>0.4: assignments[name]="chaotic"
+                elif c["std"]<0.15*(abs(c.get("mean",1.0))+1e-9) or c["sparsity"]<0.1: assignments[name]="stable"
+                elif c["gradient_magnitude"]>0.4: assignments[name]="transient"
+                else: assignments[name]="boundary"
+            for name, p_type in assignments.items():
+                data = self.tensor_field[name]; chars = tensor_characteristics[name]; vocab = symbol_vocabulary.get(p_type, symbol_vocabulary["unknown"])
+                segments = self._segment_tensor(data)
+                if not segments: self.symbolic_patterns[name]=[vocab[0]]; continue
+                seq = []
+                for seg in segments:
+                    if seg.size==0: continue
+                    intensity = np.mean(seg); min_v,max_v = chars["min"],chars["max"]
+                    norm_i = 0.5;
+                    if max_v > min_v: norm_i = np.clip((intensity-min_v)/(max_v-min_v),0,1)
+                    idx = int(round(norm_i*(len(vocab)-1))); seq.append(vocab[idx])
+                self.symbolic_patterns[name] = seq if seq else [vocab[0]]
+                level = min(2,int(np.clip(chars["entropy"],0,1)*3)); self.abstraction_hierarchy[f"level_{level}"]["symbols"].append(name)
+            for level_name, level_data in self.abstraction_hierarchy.items():
+                sym_in_lvl = level_data["symbols"]; rels = level_data["relations"]
+                for i,n1 in enumerate(sym_in_lvl):
+                    for j in range(i+1,len(sym_in_lvl)):
+                        n2=sym_in_lvl[j]
+                        if n1 in self.symbolic_patterns and n2 in self.symbolic_patterns:
+                            sim = self._calculate_symbol_similarity(self.symbolic_patterns[n1],self.symbolic_patterns[n2])
+                            if sim > 0.5: rels[f"{n1}__{n2}"]={"type":"similar","strength":round(sim,3)}
+            self.logger.info(f"Symbolic encoding complete. Patterns: {len(self.symbolic_patterns)}.")
+            return self.symbolic_patterns
+        except Exception as e: self.logger.exception("Error in encode_symbolic"); raise RuntimeError(f"Encode failed: {e}")
+
+    def _measure_periodicity(self, tensor: np.ndarray) -> float:
+        flat = tensor.flatten()
+        if len(flat) < 4 or np.isclose(np.std(flat), 0.0): return 0.0
+        flat_norm = (flat - np.mean(flat)) / (np.std(flat) + 1e-9)
+        autocorr = np.correlate(flat_norm, flat_norm, mode='full')
+        autocorr_lag0 = autocorr[len(flat_norm)-1]
+        autocorr = autocorr[len(flat_norm):]
+        if not np.isclose(autocorr_lag0, 0.0): autocorr = autocorr / autocorr_lag0
+        else: return 0.0
+        if autocorr.size < 3 : return 0.0
+        peaks = [(i+1, autocorr[i]) for i in range(1,len(autocorr)-1) if autocorr[i]>autocorr[i-1] and autocorr[i]>autocorr[i+1] and autocorr[i]>0.25]
+        if not peaks: return 0.0
+        avg_peak_h = np.mean([p[1] for p in peaks])
+        if len(peaks)<2: return float(avg_peak_h*0.5)
+        peak_dist_reg = 1.0 - min(1.0, np.std(np.diff([p[0] for p in peaks])) / (np.mean(np.diff([p[0] for p in peaks])) + 1e-9))
+        return float(np.clip((avg_peak_h*0.6) + (peak_dist_reg*0.4),0,1))
+
+    def _segment_tensor(self, tensor: np.ndarray) -> List[np.ndarray]:
+        if tensor.ndim == 0: return [np.array([tensor.item()])]
+        if tensor.size == 0: return []
+        if tensor.ndim == 1: return self._segment_1d_tensor(tensor)
+        elif tensor.ndim == 2: return self._segment_2d_tensor(tensor)
+        else:
+            self.logger.debug(f"Segmenting high-dim tensor {tensor.shape} by slicing first axis.")
+            segments: List[np.ndarray] = []
+            num_slices = min(max(1,tensor.shape[0]//10 if tensor.shape[0]>=10 else 1),3)
+            indices = np.linspace(0,tensor.shape[0]-1,num_slices,dtype=int)
+            for i in indices: segments.extend(self._segment_tensor(tensor[i,...]))
+            return segments if segments else ([tensor.flatten()] if tensor.size > 0 else [])
+
+    def _segment_1d_tensor(self, tensor: np.ndarray) -> List[np.ndarray]:
+        if tensor.size == 0: return []
+        seg_size = max(1,min(len(tensor),max(3,len(tensor)//5 if len(tensor)>=15 else 3)))
+        segments: List[np.ndarray] = []
+        step = max(1, seg_size//2 if seg_size>1 else 1)
+        for i in range(0,len(tensor)-seg_size+1,step): segments.append(tensor[i:i+seg_size])
+        if not segments and tensor.size>0: segments.append(tensor)
+        return segments
+
+    def _segment_2d_tensor(self, tensor: np.ndarray) -> List[np.ndarray]:
+        if tensor.size == 0: return []
+        h,w = tensor.shape; nbh = max(1,min(3,h//3 if h>=3 else 1)); nbw = max(1,min(3,w//3 if w>=3 else 1))
+        gh = max(1,h//nbh); gw = max(1,w//nbw); segments: List[np.ndarray] = []
+        for i in range(nbh):
+            rs=i*gh; re=(i+1)*gh if i<nbh-1 else h
+            for j in range(nbw):
+                cs=j*gw; ce=(j+1)*gw if j<nbw-1 else w
+                seg = tensor[rs:re,cs:ce]
+                if seg.size>0: segments.append(seg)
+        return segments if segments else ([tensor] if tensor.size > 0 else [])
+
+    def _calculate_symbol_similarity(self, seq1: List[str], seq2: List[str]) -> float:
+        s1=[str(s) for s in seq1]; s2=[str(s) for s in seq2]; m,n=len(s1),len(s2)
+        if m==0 and n==0: return 1.0
+        if m==0 or n==0: return 0.0
+        dp=np.zeros((m+1,n+1),dtype=int)
+        for i in range(m+1): dp[i,0]=i
+        for j in range(n+1): dp[0,j]=j
+        for r in range(1,m+1):
+            for c in range(1,n+1):
+                cost = 0 if s1[r-1]==s2[c-1] else 1
+                dp[r,c] = min(dp[r-1,c]+1, dp[r,c-1]+1, dp[r-1,c-1]+cost)
+        return 1.0-(dp[m,n]/max(m,n))
+
+    def verify_interpretability(self) -> Dict[str, Any]:
+        self.logger.warning("--- SUT: Entering verify_interpretability ---")
+        self.logger.warning(f"--- SUT: Logger handlers: {self.logger.handlers} ---")
+        self.logger.warning(f"--- SUT: Logger effective level: {self.logger.getEffectiveLevel()} (WARNING is {logging.WARNING}) ---")
+        self.logger.warning(f"--- SUT: Logger isEnabledFor WARNING: {self.logger.isEnabledFor(logging.WARNING)} ---")
+        if not self.symbolic_patterns:
+            self.logger.error("No symbolic patterns to verify. Run encode_symbolic first.")
+            raise ValueError("No symbolic patterns to verify. Run encode_symbolic first.")
+        self.logger.warning(f"--- SUT DEBUG: self.grammar is: '{self.grammar}' (type: {type(self.grammar)}) ---")
+        if not self.grammar:
+            self.logger.warning("--- SUT DEBUG: Condition 'if not self.grammar' is TRUE. Emitting expected warning. ---")
+            self.logger.warning("Grammar not yet extracted. Interpretability assessment will be limited.")
+        else:
+            self.logger.warning("--- SUT DEBUG: Condition 'if not self.grammar' is FALSE. NOT emitting expected warning. ---")
+        metrics: Dict[str,Any]={"symbol_entropy":{},"grammar_complexity":None,"abstraction_coherence":{},"human_readability":{},"overall_score":0.0}
+        try:
+            entropies=[np.nan_to_num(-sum((c/len(s))*np.log2(c/len(s)) for c in Counter(s).values() if c>0)) / (np.log2(len(set(s))) if len(set(s))>1 else 1.0) for s in self.symbolic_patterns.values() if s]
+            metrics["symbol_entropy"] = {k:np.nan_to_num(-sum((c/len(s))*np.log2(c/len(s)) for c in Counter(s).values() if c>0))/(np.log2(len(set(s))) if len(set(s))>1 else 1.0) for k,s in self.symbolic_patterns.items() if s}
+            avg_sym_ent=np.mean(entropies) if entropies else 0.0
+            gc_score=0.5
+            if self.grammar and self.grammar.get("production_rules"):
+                nr=sum(len(rl) for rl in self.grammar["production_rules"].values()); nnt=len(self.grammar["non_terminals"]); nt=len(self.grammar["terminals"])
+                arl=np.mean([len(r) for rl in self.grammar["production_rules"].values() for rsl in rl for r in rsl if r]) if nr>0 else 0
+                cs=(np.log1p(nr)/np.log1p(50)+np.log1p(nnt)/np.log1p(20)+np.log1p(arl)/np.log1p(5))/3; gc_score=1.0-np.clip(cs,0,1)
+                metrics["grammar_complexity"]={"score":gc_score,"rules":nr,"non_terminals":nnt,"terminals":nt,"avg_rule_length":arl}
+            else: metrics["grammar_complexity"]=None
+            coherence_scores=[]
+            for lvl,dat in self.abstraction_hierarchy.items():
+                syms=dat["symbols"];rels=dat["relations"]
+                if not syms or len(syms)<2: continue
+                max_rels=(len(syms)*(len(syms)-1))/2.0; dens=len(rels)/max_rels if max_rels>0 else 0
+                strens=[r.get("strength",0.0) for r in rels.values() if isinstance(r,dict)]; mstr=np.mean(strens) if strens else 0
+                coh=(dens*0.5+mstr*0.5); metrics["abstraction_coherence"][lvl]=coh; coherence_scores.append(coh)
+            avg_coh=np.mean(coherence_scores) if coherence_scores else 0.5
+            read_scores=[]
+            for name,seq in self.symbolic_patterns.items():
+                if not seq: continue
+                slen=len(seq); uniq_c=len(set(seq)); ur=uniq_c/slen if slen>0 else 0
+                l_sc=np.clip(1.0-(max(0,slen-20)/80.0),0,1); u_sc=np.clip(1.0-abs(ur-0.5)/0.5,0,1); rep_sc=self._calculate_repetition_index(seq)
+                read=(0.4*l_sc+0.3*u_sc+0.3*rep_sc); metrics["human_readability"][name]=read; read_scores.append(read)
+            avg_read=np.mean(read_scores) if read_scores else 0.5
+            final_gc_score = gc_score if metrics["grammar_complexity"] is not None else 0.5
+            overall=(0.25*(1-avg_sym_ent)+0.25*final_gc_score+0.25*avg_coh+0.25*avg_read)
+            metrics["overall_score"]=np.clip(overall,0,1); self.interpretability_scores=metrics
+            self.logger.info(f"Interpretability verification complete. Score: {metrics['overall_score']:.3f}")
+            return metrics
+        except Exception as e: self.logger.exception("Error in verify_interpretability"); raise RuntimeError(f"Verify failed: {e}")
+
+    def _calculate_repetition_index(self, sequence: List[str]) -> float:
+        if len(sequence)<4: return 0.0
+        ng_counts:Counter[Tuple[str,...]]=Counter(); total_ng_instances=0
+        for n_val in [2,3]:
+            if len(sequence)<n_val: continue
+            num_ng_this_n=len(sequence)-n_val+1; total_ng_instances+=num_ng_this_n
+            for i in range(num_ng_this_n): ng_counts[tuple(sequence[i:i+n_val])]+=1
+        if total_ng_instances==0: return 0.0
+        num_rep_occur=sum(c-1 for c in ng_counts.values() if c>1)
+        return np.clip(num_rep_occur/total_ng_instances if total_ng_instances>0 else 0.0,0,1)
 
 def main():
-    parser = argparse.ArgumentParser(description="SVELTE Symbolic Mapping CLI")
-    parser.add_argument('model', type=str, help='Path to GGUF model file')
-    args = parser.parse_args()
-    from src.tensor_analysis.gguf_parser import GGUFParser
-    gguf = GGUFParser(args.model)
-    gguf.parse()
-    from src.tensor_analysis.tensor_field import TensorFieldConstructor
-    tensor_field_constructor = TensorFieldConstructor(gguf.tensors)
-    tensor_field = tensor_field_constructor.construct()
-    symbolic_mapping = SymbolicMappingModule({}, tensor_field)
-    symbolic_mapping.extract_grammar()
-    symbolic_mapping.encode_symbolic()
-    symbolic_mapping.verify_interpretability()
-    import json
-    print(json.dumps({'symbolic_patterns': getattr(symbolic_mapping, 'symbolic_patterns', None), 'grammar': getattr(symbolic_mapping, 'grammar', None)}, indent=2, ensure_ascii=False))
+    import argparse; import json
+    logging.basicConfig(level=logging.INFO,format='%(asctime)s-%(name)s-%(levelname)s-%(message)s')
+    logger=logging.getLogger("SymbolicMappingMain")
+    parser=argparse.ArgumentParser(description="SVELTE Symbolic Mapping CLI")
+    parser.add_argument('--tensor_file',type=str,help='Path to .npz for tensor_field')
+    parser.add_argument('--entropy_file',type=str,help='Path to .json for entropy_maps')
+    args=parser.parse_args()
+    if args.tensor_file and args.entropy_file:
+        try:
+            logger.info(f"Loading tensors: {args.tensor_file}"); tf_data=np.load(args.tensor_file); tf={n:tf_data[n] for n in tf_data.files}; logger.info(f"Loaded {len(tf)} tensors.")
+            logger.info(f"Loading entropy: {args.entropy_file}");_f=open(args.entropy_file,'r'); em=json.load(_f);_f.close(); logger.info(f"Loaded {len(em)} entries.")
+        except Exception as e: logger.error(f"File load error: {e}. Using dummy."); tf={"dummy_T":np.random.rand(5,5)};em={"dummy_T":0.5}
+    else:
+        logger.info("Paths not given, using dummy data."); tf={"sin":np.sin(np.linspace(0,8*np.pi,100)),"rand":np.random.rand(50)*10,"stable":np.ones((10,10))*5,"chaotic":np.cumsum(np.random.randn(100))}
+        em={"sin":0.1,"rand":0.95,"stable":0.01,"chaotic":0.7}; [em.setdefault(k,0.5) for k in tf]
+    try:
+        mapper=SymbolicMappingModule(em,tf); print("\n--- Encoding ---")
+        pats=mapper.encode_symbolic()
+        for n,s in pats.items():tf_s=str(mapper.tensor_field[n].shape) if n in mapper.tensor_field else "N/A";e_s=f"{mapper.entropy_maps.get(n,'N/A'):.2f}" if isinstance(mapper.entropy_maps.get(n),(float,int,np.number)) else "N/A";print(f"T:'{n}' (S:{tf_s},E:{e_s}): {' '.join(s[:10])}{'...'if len(s)>10 else ''}(len:{len(s)})")
+        print("\n--- Grammar ---");gram=mapper.extract_grammar()
+        if gram and gram.get("terminals"):
+            print(f"  Terminals ({len(gram['terminals'])}): {gram.get('terminals', [])[:10]}{'...' if len(gram.get('terminals',[])) > 10 else ''}")
+            print(f"  Non-Terminals ({len(gram['non_terminals'])}): {gram.get('non_terminals', [])}")
+            rules_preview = list(gram.get('production_rules', {}).items())[:3]
+            if rules_preview:
+                 print(f"  Production Rules (sample of {sum(len(r_list) for r_list in gram.get('production_rules', {}).values())} total rules):")
+                 for nt, rules_for_nt in rules_preview:
+                     if rules_for_nt: # Ensure there's at least one rule list for this NT
+                        print(f"    {nt} -> {' | '.join([' '.join(r) for r in rules_for_nt[:2]])}{'...' if len(rules_for_nt) > 2 else ''}")
+            else:
+                print("  No production rules generated.")
+        else:
+            print("  No grammar extracted.")
+        print("\n--- Interpretability ---");interp=mapper.verify_interpretability();print(f" Overall Score: {interp.get('overall_score','N/A'):.3f}")
+        if isinstance(interp.get('symbol_entropy',{}),dict)and interp['symbol_entropy']:
+            print(f" Symbol Entropy(avg norm):{np.mean(list(interp['symbol_entropy'].values())):.3f}")
+        if isinstance(interp.get('human_readability',{}),dict)and interp['human_readability']:print(f" Readability(avg):{np.mean(list(interp['human_readability'].values())):.3f}")
+        if isinstance(interp.get('grammar_complexity'),dict):print(f" Grammar Score:{interp['grammar_complexity'].get('score','N/A'):.3f}")
+    except Exception as e:logger.error(f"Error: {e}",exc_info=True)
 
-if __name__ == "__main__":
-    main()
+if __name__=="__main__":main()

@@ -171,7 +171,7 @@ class EntropyAnalysisModule:
             
         return self.entropy_maps
 
-    def _calculate_entropy_value(self, data: np.ndarray, bins: int, method: str, alpha: float) -> float:
+    def _calculate_entropy_value(self, data: np.ndarray, bins: int, method: str, alpha: float = 2.0) -> float:
         """
         Calculate entropy value for a single data vector using specified method.
         
@@ -179,7 +179,7 @@ class EntropyAnalysisModule:
             data: Input data vector
             bins: Number of bins for histogram
             method: Entropy calculation method
-            alpha: Parameter for Rényi and Tsallis entropy
+            alpha (float, optional): Parameter for Rényi and Tsallis entropy. Defaults to 2.0.
             
         Returns:
             float: Calculated entropy value
@@ -193,25 +193,38 @@ class EntropyAnalysisModule:
         if data.size == 0:
             self.logger.warning("Empty data vector after filtering NaN/Inf values")
             return 0.0
+
+        # Calculate probabilities from histogram counts
+        hist_counts, bin_edges = np.histogram(data, bins=bins, density=False)
+
+        if hist_counts.sum() == 0: # All data fell outside explicit range or data was empty
+            self.logger.debug("Sum of histogram counts is zero, returning 0.0 entropy.")
+            return 0.0
             
-        hist, _ = np.histogram(data, bins=bins, density=True)
-        hist = hist[hist > 0]  # Remove zero probabilities
+        probabilities = hist_counts / hist_counts.sum()
+        # Use only non-zero probabilities for entropy calculation to avoid log(0)
+        probabilities = probabilities[probabilities > 0]
         
-        if hist.size == 0:
+        if probabilities.size == 0: # Should ideally be caught by hist_counts.sum() == 0
             return 0.0
             
         if method == "shannon":
-            return -np.sum(hist * np.log2(hist))
+            return -np.sum(probabilities * np.log2(probabilities))
             
         elif method == "renyi":
-            if alpha <= 0 or alpha == 1:
+            if alpha <= 0 or alpha == 1: # alpha=1 is Shannon entropy limit, but formula undefined
+                self.logger.warning(f"Alpha for Rényi entropy must be positive and not 1. Got {alpha}. Using Shannon as fallback if alpha=1.")
+                if alpha == 1: return -np.sum(probabilities * np.log2(probabilities)) # Shannon limit
                 raise ValueError(f"Alpha must be positive and not equal to 1 for Rényi entropy, got {alpha}")
-            return (1 / (1 - alpha)) * np.log2(np.sum(hist ** alpha))
+            return (1 / (1 - alpha)) * np.log2(np.sum(probabilities ** alpha))
             
         elif method == "tsallis":
             if alpha <= 0:
                 raise ValueError(f"Alpha must be positive for Tsallis entropy, got {alpha}")
-            return (1 / (alpha - 1)) * (1 - np.sum(hist ** alpha))
+            # For alpha=1, Tsallis entropy limit is Shannon entropy
+            if np.isclose(alpha, 1.0):
+                return -np.sum(probabilities * np.log2(probabilities))
+            return (1 / (alpha - 1)) * (1 - np.sum(probabilities ** alpha))
             
         elif method == "differential":
             # Kozachenko-Leonenko estimator for differential entropy
@@ -225,7 +238,9 @@ class EntropyAnalysisModule:
             return 0.0
             
         elif method == "scipy":
-            return scipy_entropy(hist, base=2)
+            # scipy_entropy expects counts (it will normalize) or probabilities (that sum to 1)
+            # We pass probabilities that sum to 1.
+            return scipy_entropy(probabilities, base=2)
             
         else:
             raise ValueError(f"Unknown entropy method: {method}")
@@ -306,7 +321,7 @@ class EntropyAnalysisModule:
             
             self.gradients[name] = {
                 'magnitude': grad_mag,
-                'vectors': grad_vectors
+                'vectors': list(grad_vectors) # Ensure it's stored as a list
             }
             
             self.logger.debug(f"Computed gradient field for '{name}', magnitude range: [{np.min(grad_mag):.6f}, {np.max(grad_mag):.6f}]")

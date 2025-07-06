@@ -5,6 +5,8 @@ Quantization scheme identification and dequantization simulation for SVELTE Fram
 import numpy as np
 from typing import Dict, Any
 import warnings
+from scipy import stats as scipy_stats # Added for skew/kurtosis
+from scipy import signal # Added for find_peaks
 
 class QuantizationReconstructor:
     def __init__(self, quantization_info: Dict[str, Any]):
@@ -263,16 +265,17 @@ class QuantizationReconstructor:
      Analyzes a tensor to identify quantization artifacts and estimate precision loss.
      
      This method performs comprehensive analysis including:
-     - Detection of quantization scheme
-     - Estimation of quantization parameters
-     - Identification of value clusters and banding
-     - Frequency domain analysis for artifact detection
-     - Statistical analysis of value distribution
-     - Signal quality metrics
-     - Precision loss estimation
+     - Detection of quantization scheme and its parameters (bits, scale, zero-point).
+     - Statistical analysis of tensor value distribution (min, max, mean, std, histogram).
+     - Identification of common quantization artifacts (saturation, value clustering, banding, zero bias).
+     - Frequency domain analysis (FFT) to detect periodic patterns.
+     - Calculation of quality metrics (MSE, PSNR, SQNR, SSIM) if an original tensor is provided.
+     - Estimation of precision loss based on bit depth or comparison with an original tensor.
+     - Generation of recommendations based on findings.
+     - Calculation of an overall confidence score for the analysis.
      
      Args:
-      tensor (np.ndarray): The tensor to analyze for quantization artifacts
+      tensor (np.ndarray): The tensor to analyze for quantization artifacts.
       original_tensor (np.ndarray, optional): Original unquantized tensor for reference
       confidence_threshold (float, optional): Threshold for confidence scores (0.0-1.0)
       
@@ -655,7 +658,7 @@ class QuantizationReconstructor:
      # If original tensor is available, calculate direct comparison metrics
      if original_tensor is not None and tensor.shape == original_tensor.shape:
       # Calculate Mean Squared Error
-       "expected_peaks": expected_pe
+      # "expected_peaks": expected_pe # Typo removed
       mse = np.mean((tensor - original_tensor) ** 2)
       metrics["mse"] = float(mse)
       
@@ -710,3 +713,235 @@ class QuantizationReconstructor:
         
       except Exception as e:
        metrics["ssim_error"] = str(e)
+     return metrics
+
+    def _frequency_domain_analysis(self, tensor: np.ndarray) -> Dict[str, Any]:
+     """
+     Performs basic frequency domain analysis using FFT on the flattened tensor.
+     This can help identify periodic artifacts or strong regular patterns that might
+     be related to quantization, especially banding or interference.
+
+     Args:
+        tensor (np.ndarray): The input tensor.
+
+     Returns:
+        Dict[str, Any]: A dictionary containing:
+            - 'dominant_frequencies': List of top 5 dominant frequencies (excluding DC).
+            - 'dominant_powers': Corresponding power spectrum values for these frequencies.
+            - 'has_strong_periodic_signal': Boolean indicating if a strong periodic signal
+                                            was heuristically detected.
+            - 'fft_applied_to_flattened': True, indicating the analysis was on the flattened tensor.
+            - 'error': Error message if FFT analysis failed or tensor was unsuitable.
+     """
+     if tensor.ndim == 0 or tensor.size < 2: # Cannot perform FFT on scalar or single value
+        return {"error": "Tensor not suitable for FFT (scalar or too small).", "dominant_frequencies": [], "dominant_powers": [], "has_strong_periodic_signal": False}
+
+     analysis = {}
+     try:
+        # For multi-dimensional tensors, analyze 1D slices or aggregate
+        # Here, we take the FFT of the flattened tensor for simplicity
+        flat_tensor = tensor.flatten().astype(np.float32)
+
+        # Perform FFT
+        fft_result = np.fft.fft(flat_tensor)
+        fft_freq = np.fft.fftfreq(flat_tensor.size)
+
+        # Get power spectrum (magnitude squared)
+        power_spectrum = np.abs(fft_result)**2
+
+        # Identify dominant frequencies (excluding DC component at index 0)
+        if flat_tensor.size > 1:
+            dominant_freq_indices = np.argsort(power_spectrum[1:])[-5:] + 1 # Top 5 excluding DC
+            dominant_frequencies = np.abs(fft_freq[dominant_freq_indices])
+            dominant_powers = power_spectrum[dominant_freq_indices]
+
+            analysis["dominant_frequencies"] = dominant_frequencies.tolist()
+            analysis["dominant_powers"] = dominant_powers.tolist()
+            analysis["has_strong_periodic_signal"] = bool(np.max(dominant_powers) > (np.mean(power_spectrum[1:]) * 10)) # Heuristic
+        else:
+            analysis["dominant_frequencies"] = []
+            analysis["dominant_powers"] = []
+            analysis["has_strong_periodic_signal"] = False
+
+        analysis["fft_applied_to_flattened"] = True
+
+     except Exception as e:
+        analysis["error"] = f"FFT analysis failed: {str(e)}"
+     return analysis
+
+    def _estimate_precision_loss(self, tensor: np.ndarray,
+                               original_tensor: np.ndarray = None,
+                               scheme_data: Dict[str, Any] = None) -> Dict[str, Any]:
+     """
+     Estimates precision loss due to quantization.
+
+     If an original (unquantized) tensor is provided, loss is estimated by direct
+     comparison (e.g. difference statistics, reduction in unique values).
+     Otherwise, if scheme data (like estimated bit depth) is available, loss is
+     estimated based on the reduction from an assumed original precision (e.g., 32-bit float).
+
+     Args:
+        tensor (np.ndarray): The quantized tensor.
+        original_tensor (np.ndarray, optional): The original unquantized tensor.
+        scheme_data (Dict[str, Any], optional): Data about the detected quantization scheme,
+                                                including 'estimated_bits'.
+
+     Returns:
+        Dict[str, Any]: A dictionary containing:
+            - 'method': The method used for estimation ('direct_comparison',
+                        'bit_depth_estimation', or 'unknown').
+            - 'details': A sub-dictionary with specific loss metrics, e.g.,
+                         'diff_mean_abs', 'diff_std', 'max_abs_error' (for direct comparison),
+                         or 'estimated_bit_reduction', 'quantization_levels_lost_factor'
+                         (for bit depth estimation).
+     """
+     loss_info = {"method": None, "details": {}}
+
+     if original_tensor is not None and tensor.shape == original_tensor.shape:
+        loss_info["method"] = "direct_comparison"
+        # Calculate difference statistics
+        diff = original_tensor.astype(np.float64) - tensor.astype(np.float64) # Use float64 for precision
+        loss_info["details"]["diff_mean_abs"] = float(np.mean(np.abs(diff)))
+        loss_info["details"]["diff_std"] = float(np.std(diff))
+        loss_info["details"]["max_abs_error"] = float(np.max(np.abs(diff)))
+
+        # Simplified entropy change (requires careful binning for true information loss)
+        # For now, let's use unique value count as a proxy if bits are not well estimated
+        original_unique = len(np.unique(original_tensor))
+        quantized_unique = len(np.unique(tensor))
+        loss_info["details"]["unique_value_reduction_ratio"] = float(quantized_unique / original_unique) if original_unique > 0 else 1.0
+
+     elif scheme_data and "estimated_bits" in scheme_data:
+        loss_info["method"] = "bit_depth_estimation"
+        estimated_bits = scheme_data["estimated_bits"]
+        # Assuming original was high precision (e.g., 32-bit float)
+        original_bits = 32
+        if estimated_bits > 0 and estimated_bits < original_bits :
+            loss_info["details"]["estimated_bit_reduction"] = original_bits - estimated_bits
+            loss_info["details"]["quantization_levels_lost_factor"] = float(2**(original_bits - estimated_bits))
+        else:
+            loss_info["details"]["estimated_bit_reduction"] = 0
+            loss_info["details"]["quantization_levels_lost_factor"] = 1.0
+
+     else:
+        loss_info["method"] = "unknown"
+        loss_info["details"]["message"] = "Insufficient data to estimate precision loss."
+
+     return loss_info
+
+    def _generate_recommendations(self, results: Dict[str, Any]) -> list[str]:
+     """
+     Generates a list of textual recommendations based on the analysis results.
+     These recommendations highlight potential issues or areas for further investigation.
+
+     Args:
+        results (Dict[str, Any]): The comprehensive analysis results dictionary
+                                  from `identify_artifacts`.
+
+     Returns:
+        list[str]: A list of string recommendations.
+     """
+     recommendations = []
+
+     # Scheme detection confidence
+     if results.get("scheme_detection_confidence", 1.0) < 0.6:
+        recommendations.append("Quantization scheme detection confidence is low. Results may be less reliable.")
+
+     # Artifacts
+     artifacts = results.get("artifacts", {})
+     if artifacts.get("saturation", {}).get("has_significant_saturation"):
+        recommendations.append("Significant saturation detected at min/max values. Consider adjusting quantization range or clipping values.")
+     if artifacts.get("banding", {}).get("has_banding"):
+        recommendations.append("Banding artifacts detected. This may indicate overly aggressive quantization or issues with value distribution.")
+     if artifacts.get("value_clustering", {}).get("has_significant_clustering"):
+        if artifacts["value_clustering"]["peak_count"] < 2**results.get("estimated_bits", 8) / 2: # Heuristic
+            recommendations.append("Value clustering suggests effective bit depth might be lower than estimated or data has sparse value representation.")
+     if artifacts.get("zero_bias",{}).get("has_zero_bias"):
+        recommendations.append("Bias detected around zero. Check if this is expected or an artifact.")
+
+     # Quality Metrics (if original tensor was provided)
+     metrics = results.get("metrics", {})
+     if "psnr" in metrics and metrics["psnr"] != float('inf') and metrics["psnr"] < 20: # Low PSNR
+        recommendations.append(f"Low PSNR ({metrics['psnr']:.2f} dB) indicates significant quality loss compared to original.")
+     if "ssim" in metrics and metrics["ssim"] < 0.8: # Low SSIM
+        recommendations.append(f"Low SSIM ({metrics['ssim']:.3f}) indicates structural dissimilarity from original.")
+
+     # Precision Loss
+     precision_loss = results.get("precision_loss", {})
+     if precision_loss.get("details", {}).get("estimated_bit_reduction", 0) > 16:
+        recommendations.append("High estimated bit reduction. Significant precision loss is likely.")
+     if precision_loss.get("details", {}).get("max_abs_error", 0) > (results.get("tensor_stats",{}).get("max",1) - results.get("tensor_stats",{}).get("min",0)) * 0.1: # Large max error
+         recommendations.append("Maximum absolute error is high relative to tensor range.")
+
+     if not recommendations:
+        recommendations.append("No major issues detected based on current heuristics.")
+
+     return recommendations
+
+    def _calculate_confidence(self, results: Dict[str, Any]) -> float:
+     """
+     Calculates an overall confidence score for the quantization artifact analysis.
+
+     This score is a heuristic aggregation of various confidence factors derived
+     during the analysis, such as scheme detection confidence, artifact detection
+     confidence, consistency of findings, and quality metrics if available.
+
+     Args:
+        results (Dict[str, Any]): The comprehensive analysis results dictionary
+                                  from `identify_artifacts`.
+
+     Returns:
+        float: An overall confidence score between 0.0 and 1.0.
+     """
+     total_confidence_score = 0
+     num_factors = 0
+
+     # Scheme detection confidence
+     scheme_confidence = results.get("scheme_detection_confidence", 0.5)
+     total_confidence_score += scheme_confidence
+     num_factors += 1
+
+     # Artifact confidence (average confidence of detected artifacts)
+     artifact_confidences = []
+     for artifact_type, artifact_data in results.get("artifacts", {}).items():
+        if isinstance(artifact_data, dict) and "confidence" in artifact_data:
+            artifact_confidences.append(artifact_data["confidence"])
+
+     if artifact_confidences:
+        avg_artifact_confidence = np.mean(artifact_confidences)
+        total_confidence_score += avg_artifact_confidence
+        num_factors += 1
+     else: # No specific artifacts with confidence, use a neutral value
+        total_confidence_score += 0.7 # Base confidence if no specific artifacts are flagged
+        num_factors += 1
+
+     # Consistency between estimated bits and unique values
+     estimated_bits = results.get("estimated_bits")
+     unique_values = results.get("tensor_stats", {}).get("unique_values")
+     if estimated_bits is not None and unique_values is not None and unique_values > 1:
+        expected_max_unique = 2**estimated_bits
+        # Confidence drops if unique values are far from expected for estimated_bits
+        if unique_values > expected_max_unique or unique_values < expected_max_unique / 4 : # Heuristic range
+            consistency_confidence = 0.6
+        else:
+            consistency_confidence = 0.9
+        total_confidence_score += consistency_confidence
+        num_factors +=1
+
+     # If original tensor provided, metrics quality can influence confidence
+     if "mse" in results.get("metrics", {}):
+        # Example: if PSNR is very high, confidence in analysis might be higher
+        psnr = results["metrics"].get("psnr", 0)
+        if psnr == float('inf') or psnr > 40: # Very good quality
+            total_confidence_score += 0.95
+        elif psnr > 25: # Good quality
+            total_confidence_score += 0.8
+        else: # Lower quality
+            total_confidence_score += 0.65
+        num_factors += 1
+
+     if num_factors == 0:
+        return 0.5 # Default if no factors contributed
+
+     final_confidence = total_confidence_score / num_factors
+     return min(max(final_confidence, 0.0), 1.0) # Ensure it's between 0 and 1

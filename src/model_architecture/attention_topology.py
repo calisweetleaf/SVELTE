@@ -93,6 +93,8 @@ class AttentionTopologySystem:
   self.cached_results = {}
   
   self.logger.info(f"Initialized AttentionTopologySystem with {len(tensor_field)} tensor fields")
+  self.SCIPY_STATS_AVAILABLE = SCIPY_STATS_AVAILABLE # Store for local use
+  self.MATPLOTLIB_AVAILABLE = MATPLOTLIB_AVAILABLE # Store for local use
 
  def _setup_logging(self, log_level: int) -> None:
   """Configure logging for the topology system."""
@@ -145,144 +147,158 @@ class AttentionTopologySystem:
    
   # Create metric tensor using the attention weights directly
   # g_ij = -log(A_ij + eps) to convert attention weights to distances
-  metric = -np.log(tensor + self.eps)
-  
-  # Ensure the metric is positive definite
-  min_eig = np.min(np.linalg.eigvalsh(metric.reshape(-1, metric.shape[-1])).reshape(metric.shape[:-1]))
-  if min_eig < 0:
-   self.logger.warning("Adjusting metric tensor to ensure positive definiteness")
-   metric += np.abs(min_eig) + self.eps
-   
+  metric = -np.log(tensor + self.eps) # metric can be (batch, dim, dim) or (dim, dim)
+
+  # Ensure the metric is positive definite.
+  if metric.ndim == 3: # Batched
+      for b_idx in range(metric.shape[0]):
+          g_slice = metric[b_idx]
+          try:
+              # Adding a small epsilon to the diagonal before eigvalsh for stability
+              # g_stable = g_slice + np.eye(g_slice.shape[0]) * self.eps
+              min_eig_val = np.min(np.linalg.eigvalsh(g_slice))
+              if min_eig_val <= self.eps: # Check for non-positive definiteness (use eps for tolerance)
+                  self.logger.warning(f"Adjusting metric tensor for batch {b_idx} to ensure positive definiteness. Min eigenvalue: {min_eig_val:.2e}")
+                  metric[b_idx] += (np.abs(min_eig_val) + self.eps) * np.eye(g_slice.shape[-1])
+          except np.linalg.LinAlgError:
+              self.logger.warning(f"LinAlgError for batch {b_idx} during eigvalsh for positive definiteness check. Adding epsilon * I.")
+              metric[b_idx] += self.eps * np.eye(g_slice.shape[-1]) # Add epsilon * Identity
+  elif metric.ndim == 2: # Single
+      try:
+          # g_stable = metric + np.eye(metric.shape[0]) * self.eps
+          min_eig_val = np.min(np.linalg.eigvalsh(metric))
+          if min_eig_val <= self.eps: # Check for non-positive definiteness
+              self.logger.warning(f"Adjusting metric tensor to ensure positive definiteness. Min eigenvalue: {min_eig_val:.2e}")
+              metric += (np.abs(min_eig_val) + self.eps) * np.eye(metric.shape[-1])
+      except np.linalg.LinAlgError:
+          self.logger.warning("LinAlgError during eigvalsh for positive definiteness check. Adding epsilon * I.")
+          metric += self.eps * np.eye(metric.shape[-1]) # Add epsilon * Identity
   return metric
 
  def compute_christoffel_symbols(self, metric: np.ndarray) -> np.ndarray:
   """
-  Compute the Christoffel symbols from the metric tensor.
+  Compute the Christoffel symbols (Γ^k_ij) from the metric tensor (g_ij).
+  Formula: Γ^k_ij = 0.5 * g^{km} (∂_i g_{mj} + ∂_j g_{mi} - ∂_m g_{ij})
   
   Args:
-   metric: The metric tensor
+   metric: The metric tensor, shape (dim, dim) or (batch_size, dim, dim).
    
   Returns:
-   Christoffel symbols of the second kind
+   Christoffel symbols of the second kind, shape (dim, dim, dim) or (batch_size, dim, dim, dim).
+   Order: Γ^k_ij -> christoffel[b, k, i, j] (for batch) or christoffel[k,i,j] (single)
   """
-  dim = metric.shape[-1]
+  is_batched = metric.ndim == 3
+  metric_batched = metric if is_batched else np.expand_dims(metric, axis=0)
   
-  # For each batch element
-  if metric.ndim > 2:
-   batch_size = metric.shape[0]
-   symbols = np.zeros((batch_size, dim, dim, dim))
-   
-   for b in range(batch_size):
-    g = metric[b]
-    g_inv = np.linalg.inv(g)
+  batch_size, dim, _ = metric_batched.shape
+  christoffel_batched = np.zeros((batch_size, dim, dim, dim))
+
+  for b in range(batch_size):
+    g = metric_batched[b]
+    try:
+        g_inv = np.linalg.inv(g) # g^{km}
+    except np.linalg.LinAlgError:
+        self.logger.warning(f"Metric tensor for batch {b} is singular. Using pseudo-inverse.")
+        g_inv = np.linalg.pinv(g)
+
+    # metric_derivs_numerical[l, i, j] stores ∂_l g_ij (derivative of g_ij w.r.t. x^l)
+    # This assumes that the coordinates x^l are aligned with the axes of the metric tensor g.
+    # If g is (dim, dim), np.gradient(g) returns a list of 2 arrays (derivatives along axis 0 and 1).
+    # If manifold dimension ('dim') is > g.ndim, derivatives along other axes are implicitly zero.
+    metric_derivs_numerical = np.zeros((dim, dim, dim))
     
-    # Compute partial derivatives of the metric (approximated)
-    d_g = np.zeros((dim, dim, dim))
-    for k in range(dim):
-     # Create a one-hot vector for the derivative approximation
-     e_k = np.zeros(dim)
-     e_k[k] = 1
-     
-     # Approximate derivative in the direction of e_k
-     h = 1e-5
-     d_g[:, :, k] = (np.outer(e_k, e_k) @ g @ np.outer(e_k, e_k)) / h
-    
-    # Compute Christoffel symbols
-    for i in range(dim):
-     for j in range(dim):
-      for k in range(dim):
-       for l in range(dim):
-        symbols[b, i, j, k] += 0.5 * g_inv[i, l] * (
-         d_g[l, j, k] + d_g[l, k, j] - d_g[j, k, l]
-        )
-  else:
-   g_inv = np.linalg.inv(metric)
-   symbols = np.zeros((dim, dim, dim))
-   
-   # Approximated derivatives
-   d_g = np.zeros((dim, dim, dim))
-   for k in range(dim):
-    e_k = np.zeros(dim)
-    e_k[k] = 1
-    d_g[:, :, k] = (np.outer(e_k, e_k) @ metric @ np.outer(e_k, e_k)) / 1e-5
-   
-   # Compute Christoffel symbols
-   for i in range(dim):
-    for j in range(dim):
-     for k in range(dim):
-      for l in range(dim):
-       symbols[i, j, k] += 0.5 * g_inv[i, l] * (
-        d_g[l, j, k] + d_g[l, k, j] - d_g[j, k, l]
-       )
-       
-  return symbols
+    grad_g_components = []
+    if g.ndim >= 1 : grad_g_components.append(np.gradient(g, axis=0))
+    if g.ndim >= 2 : grad_g_components.append(np.gradient(g, axis=1))
+    # For higher g.ndim, extend this. Typically g is 2D (dim x dim matrix).
+
+    for l_axis in range(len(grad_g_components)): # iterates 0, 1 for a 2D metric tensor
+        metric_derivs_numerical[l_axis, :, :] = grad_g_components[l_axis]
+    # For l_axis >= len(grad_g_components), metric_derivs_numerical[l_axis,:,:] remains zero.
+    # This means ∂_l g_ij = 0 if l >= g.ndim.
+
+    for k_christ in range(dim): # Index for Γ^k_ij
+        for i_christ in range(dim): # Index for Γ^k_ij
+            for j_christ in range(dim): # Index for Γ^k_ij
+                sum_val = 0
+                # Sum over m_summation for g^{k_christ, m_summation}
+                for m_summation in range(dim):
+                    # ∂_i g_{mj} -> metric_derivs_numerical[i_christ, m_summation, j_christ]
+                    # ∂_j g_{mi} -> metric_derivs_numerical[j_christ, m_summation, i_christ]
+                    # ∂_m g_{ij} -> metric_derivs_numerical[m_summation, i_christ, j_christ]
+
+                    term1 = metric_derivs_numerical[i_christ, m_summation, j_christ]
+                    term2 = metric_derivs_numerical[j_christ, m_summation, i_christ]
+                    term3 = metric_derivs_numerical[m_summation, i_christ, j_christ]
+
+                    sum_val += 0.5 * g_inv[k_christ, m_summation] * (term1 + term2 - term3)
+                christoffel_batched[b, k_christ, i_christ, j_christ] = sum_val
+
+  return christoffel_batched if is_batched else christoffel_batched[0]
 
  def compute_riemann_tensor(self, christoffel: np.ndarray) -> np.ndarray:
   """
-  Compute the Riemann curvature tensor from Christoffel symbols.
+  Compute the Riemann curvature tensor (R^i_jkl) from Christoffel symbols (Γ^i_jk).
+  Formula: R^i_jkl = ∂_k Γ^i_jl - ∂_l Γ^i_jk + Γ^i_mk Γ^m_jl - Γ^i_ml Γ^m_jk
   
   Args:
-   christoffel: Christoffel symbols
+   christoffel: Christoffel symbols, shape (dim, dim, dim) or (batch_size, dim, dim, dim)
+                Assumed order: Γ^i_jk -> christoffel[b, i, j, k] (for batch) or christoffel[i,j,k]
    
   Returns:
-   Riemann curvature tensor
+   Riemann curvature tensor, shape (dim,dim,dim,dim) or (batch_size,dim,dim,dim,dim)
+   Order: R^i_jkl -> riemann[b, i, j, k, l] (for batch) or riemann[i,j,k,l]
   """
-  dim = christoffel.shape[-1]
+  is_batched = christoffel.ndim == 4
+  christoffel_batched = christoffel if is_batched else np.expand_dims(christoffel, axis=0)
   
-  if christoffel.ndim > 3:
-   # Batch case
-   batch_size = christoffel.shape[0]
-   riemann = np.zeros((batch_size, dim, dim, dim, dim))
-   
-   for b in range(batch_size):
-    symbols = christoffel[b]
-       # Approximated derivatives of Christoffel symbols
-   d_symbols = np.zeros((dim, dim, dim, dim))
-   h = 1e-5
-   for m in range(dim):
-    e_m = np.zeros(dim)
-    e_m[m] = 1
-    d_symbols[:, :, :, m] = (symbols @ np.outer(e_m, e_m)) / h
+  # christoffel_batched has shape (batch_size, dim_Gamma_i, dim_Gamma_j, dim_Gamma_k)
+  batch_size, dim, _, _ = christoffel_batched.shape
+  riemann_batched = np.zeros((batch_size, dim, dim, dim, dim))
+
+  for b in range(batch_size):
+    symbols_Gamma_ijk = christoffel_batched[b] # Γ^i_jk (indices i,j,k)
+
+    # Derivatives of Christoffel symbols: ∂_p Γ^i_jk
+    # deriv_Gamma_numerical[p, i, j, k] = ∂_p Γ^i_jk
+    # p is limited by symbols_Gamma_ijk.ndim (which is 3).
+    deriv_Gamma_numerical = np.zeros((dim, dim, dim, dim)) # p, i, j, k
     
-    # Compute Riemann tensor
-    for i in range(dim):
-     for j in range(dim):
-      for k in range(dim):
-       for l in range(dim):
-        # R^i_jkl = ∂_k Γ^i_jl - ∂_l Γ^i_jk + Γ^i_mk Γ^m_jl - Γ^i_ml Γ^m_jk
-        riemann[b, i, j, k, l] = d_symbols[i, j, l, k] - d_symbols[i, j, k, l]
-        
-        for m in range(dim):
-         riemann[b, i, j, k, l] += (
-          symbols[i, m, k] * symbols[m, j, l] -
-          symbols[i, m, l] * symbols[m, j, k]
-         )
-  else:
-   # Single case
-   riemann = np.zeros((dim, dim, dim, dim))
-   
-   # Approximated derivatives
-   d_symbols = np.zeros((dim, dim, dim, dim))
-   h = 1e-5
-   for m in range(dim):
-    e_m = np.zeros(dim)
-    e_m[m] = 1
-    d_symbols[:, :, :, m] = (christoffel @ np.outer(e_m, e_m)) / h
-   
-   # Compute Riemann tensor
-   for i in range(dim):
-    for j in range(dim):
-     for k in range(dim):
-      for l in range(dim):
-       riemann[i, j, k, l] = d_symbols[i, j, l, k] - d_symbols[i, j, k, l]
-       
-       for m in range(dim):
-        riemann[i, j, k, l] += (
-         christoffel[i, m, k] * christoffel[m, j, l] -
-         christoffel[i, m, l] * christoffel[m, j, k]
-        )
-        
-  return riemann
+    grad_symbols_components = []
+    if symbols_Gamma_ijk.ndim >= 1: grad_symbols_components.append(np.gradient(symbols_Gamma_ijk, axis=0))
+    if symbols_Gamma_ijk.ndim >= 2: grad_symbols_components.append(np.gradient(symbols_Gamma_ijk, axis=1))
+    if symbols_Gamma_ijk.ndim >= 3: grad_symbols_components.append(np.gradient(symbols_Gamma_ijk, axis=2))
+
+    for p_axis in range(len(grad_symbols_components)): # 0, 1, 2 for a 3D Christoffel tensor
+        deriv_Gamma_numerical[p_axis, :, :, :] = grad_symbols_components[p_axis]
+    # For p_axis >= len(grad_symbols_components), derivatives are zero.
+
+    for i_riem in range(dim): # R^i_jkl
+        for j_riem in range(dim): # R^i_jkl
+            for k_riem in range(dim): # R^i_jkl
+                for l_riem in range(dim): # R^i_jkl
+                    # Term ∂_k Γ^i_jl: derivative of Γ^i_jl w.r.t x^k (k_riem)
+                    # Γ^i_jl is symbols_Gamma_ijk[i_riem, j_riem, l_riem]
+                    # Its derivative w.r.t. x^k_riem is deriv_Gamma_numerical[k_riem, i_riem, j_riem, l_riem]
+                    term_deriv1 = deriv_Gamma_numerical[k_riem, i_riem, j_riem, l_riem]
+
+                    # Term ∂_l Γ^i_jk: derivative of Γ^i_jk w.r.t x^l (l_riem)
+                    # Γ^i_jk is symbols_Gamma_ijk[i_riem, j_riem, k_riem]
+                    # Its derivative w.r.t. x^l_riem is deriv_Gamma_numerical[l_riem, i_riem, j_riem, k_riem]
+                    term_deriv2 = deriv_Gamma_numerical[l_riem, i_riem, j_riem, k_riem]
+
+                    term_prod = 0
+                    for m_summation in range(dim):
+                        # Γ^i_mk * Γ^m_jl -> symbols_Gamma_ijk[i_riem, m_summation, k_riem] * symbols_Gamma_ijk[m_summation, j_riem, l_riem]
+                        prod1 = symbols_Gamma_ijk[i_riem, m_summation, k_riem] * symbols_Gamma_ijk[m_summation, j_riem, l_riem]
+                        # Γ^i_ml * Γ^m_jk -> symbols_Gamma_ijk[i_riem, m_summation, l_riem] * symbols_Gamma_ijk[m_summation, j_riem, k_riem]
+                        prod2 = symbols_Gamma_ijk[i_riem, m_summation, l_riem] * symbols_Gamma_ijk[m_summation, j_riem, k_riem]
+                        term_prod += (prod1 - prod2)
+
+                    riemann_batched[b, i_riem, j_riem, k_riem, l_riem] = term_deriv1 - term_deriv2 + term_prod
+
+  return riemann_batched if is_batched else riemann_batched[0]
+
 
  def compute_curvature(self, method: CurvatureMethod = CurvatureMethod.RIEMANN) -> Dict[str, np.ndarray]:
   """
@@ -321,29 +337,72 @@ class AttentionTopologySystem:
     scalar = np.trace(ricci, axis1=-2, axis2=-1)
     self.curvature_tensors[name] = scalar
    elif method == CurvatureMethod.SECTIONAL:
-    # Compute sectional curvature for specific planes
-    dim = riemann.shape[-1]
-    sectional = np.zeros(riemann.shape[:-2] + (dim*(dim-1)//2,))
+    # Compute sectional curvature K(u,v) = R(u,v,v,u) / (g(u,u)g(v,v) - g(u,v)^2)
+    # For basis vectors e_i, e_j: K(e_i,e_j) = R_ijij / (g_ii g_jj - g_ij^2)
+    # Riemann tensor (output of compute_riemann_tensor) is R^a_bcd.
+    # We need R_abcd = g_ae R^e_bcd. For K(e_i,e_j), this means R_ijij.
+    # R_ijij = g_ia R^a_jij (sum over 'a').
     
-    idx = 0
-    for i in range(dim):
-     for j in range(i+1, dim):
-      # Create orthonormal basis vectors
-      e_i = np.zeros(dim)
-      e_i[i] = 1
-      e_j = np.zeros(dim)
-      e_j[j] = 1
-      
-      # Compute sectional curvature K(e_i, e_j)
-      if riemann.ndim > 4:  # Batch case
-       for b in range(riemann.shape[0]):
-        r = riemann[b]
-        sectional[b, idx] = r[i, j, i, j] / (r[i, i, j, j] - r[i, j, i, j])
-      else:
-       sectional[idx] = riemann[i, j, i, j] / (riemann[i, i, j, j] - riemann[i, j, i, j])
-      idx += 1
+    current_metric = self.metric_tensors[name] # g_ij
+    is_riemann_batched = riemann.ndim == 5
+    is_metric_batched = current_metric.ndim == 3
+
+    # Ensure consistent batching for metric if riemann is batched
+    current_metric_batched = current_metric
+    if is_riemann_batched and not is_metric_batched:
+        current_metric_batched = np.tile(current_metric, (riemann.shape[0], 1, 1))
+    elif not is_riemann_batched and is_metric_batched:
+        # This case should ideally not happen if inputs are consistent
+        self.logger.warning("Riemann tensor not batched but metric is. Using first metric slice.")
+        current_metric_batched = current_metric_batched[0] # Make it non-batched
+        is_metric_batched = False
+
+
+    if is_riemann_batched:
+        batch_size_r, dim_r, _, _, _ = riemann.shape # R^a_bcd -> riemann[b,a,b,c,d]
+        sectional_batched = np.zeros((batch_size_r, dim_r * (dim_r - 1) // 2))
+
+        for b_idx in range(batch_size_r):
+            g = current_metric_batched[b_idx]       # g_ij for this batch item
+            riemann_slice = riemann[b_idx]          # R^a_bcd for this batch item
+
+            # R_ajlm = g_ak R^k_jlm (Einstein sum over k)
+            # riemann_slice is R^k_jlm (k is first index, then j,l,m)
+            # So, R_ijij = g_ia R^a_jij (sum over a)
+            # r_abcd_cov[j_riem,i_plane,j_plane,i_plane,j_plane]
+            # R_ijij = g_ia * R^a_jij where R^a_jij is riemann_slice[a,j,i,j]
+
+            plane_idx = 0
+            for i_plane in range(dim_r): # Index for e_i
+                for j_plane in range(i_plane + 1, dim_r): # Index for e_j
+                    # Numerator: R_ijij = g_ia R^a_jij (sum over 'a')
+                    # riemann_slice[a, j_plane, i_plane, j_plane] is R^a_jij
+                    numerator = np.sum(g[i_plane, :] * riemann_slice[:, j_plane, i_plane, j_plane])
+
+                    denominator = (g[i_plane, i_plane] * g[j_plane, j_plane] -
+                                   g[i_plane, j_plane] * g[i_plane, j_plane])
+
+                    sectional_batched[b_idx, plane_idx] = numerator / (denominator + self.eps)
+                    plane_idx += 1
+        self.curvature_tensors[name] = sectional_batched if is_metric_batched else sectional_batched[0]
     
-    self.curvature_tensors[name] = sectional
+    else: # Non-batched Riemann R^a_bcd
+        dim_r = riemann.shape[0] # R^a_bcd -> riemann[a,b,c,d]
+        g = current_metric # Should be (dim_r, dim_r)
+        sectional_single = np.zeros((dim_r * (dim_r - 1) // 2,))
+
+        plane_idx = 0
+        for i_plane in range(dim_r):
+            for j_plane in range(i_plane + 1, dim_r):
+                # Numerator R_ijij = g_ia R^a_jij (sum over 'a')
+                # riemann[a, j_plane, i_plane, j_plane] is R^a_jij
+                numerator = np.sum(g[i_plane, :] * riemann[:, j_plane, i_plane, j_plane])
+
+                denominator = (g[i_plane, i_plane] * g[j_plane, j_plane] -
+                               g[i_plane, j_plane] * g[i_plane, j_plane])
+                sectional_single[plane_idx] = numerator / (denominator + self.eps)
+                plane_idx += 1
+        self.curvature_tensors[name] = sectional_single
    
    self.logger.debug(f"Completed curvature calculation for {name}")
    
@@ -581,16 +640,21 @@ class AttentionTopologySystem:
   # Flatten the curvature tensor for statistics
   flat_curvature = curvature.flatten()
   
-  return {
-   'mean': float(np.mean(flat_curvature)),
-   'std': float(np.std(flat_curvature)),
-   'min': float(np.min(flat_curvature)),
-   'max': float(np.max(flat_curvature)),
-   'median': float(np.median(flat_curvature)),
-   'skewness': float(scipy_stats.skew(flat_curvature)) if SCIPY_STATS_AVAILABLE else 0.0,
-   'kurtosis': float(scipy_stats.kurtosis(flat_curvature)) if SCIPY_STATS_AVAILABLE else 0.0,
-   'shape': curvature.shape
+  stats = {
+      'mean': float(np.mean(flat_curvature)),
+      'std': float(np.std(flat_curvature)),
+      'min': float(np.min(flat_curvature)),
+      'max': float(np.max(flat_curvature)),
+      'median': float(np.median(flat_curvature)),
+      'shape': curvature.shape # Add shape for context
   }
+  if self.SCIPY_STATS_AVAILABLE: # Use the instance flag
+      stats['skewness'] = float(scipy_stats.skew(flat_curvature))
+      stats['kurtosis'] = float(scipy_stats.kurtosis(flat_curvature))
+  else:
+      stats['skewness'] = 0.0 # Default if scipy.stats not available
+      stats['kurtosis'] = 0.0
+  return stats
 
  def compare_layers(self, layer1: str, layer2: str) -> Dict[str, Any]:
   """

@@ -17,13 +17,13 @@ from typing import Dict, Any, List, Tuple, Optional, Union, Set
 from dataclasses import dataclass
 from enum import Enum
 from collections import defaultdict
-import scipy.stats as stats
-from concurrent.futures import ThreadPoolExecutor
+# import scipy.stats as stats # Unused
+# from concurrent.futures import ThreadPoolExecutor # Unused
 import json
 import itertools
 from sklearn.cluster import AgglomerativeClustering
 from sklearn.metrics import silhouette_score
-import argparse
+# import argparse # Will be imported locally in main()
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -842,9 +842,28 @@ class MetaInterpretationSynthesisModule:
   self.logger.info(f"Exported interpretation to {filepath}")
 
 def main():
+    import argparse # Local import
+    # json is already imported at the top level, which is fine for its use here.
+
     parser = argparse.ArgumentParser(description="SVELTE Meta-Interpretation Synthesis CLI")
-    parser.add_argument('model', type=str, help='Path to GGUF model file')
+    parser.add_argument('model', type=str, help='Path to GGUF model file') # Simplified main for example
+    # In a real scenario, main would take paths to various module outputs or a project directory.
     args = parser.parse_args()
+
+    # This main function is a basic example.
+    # It would need to load or generate 'module_outputs' properly.
+    # For demonstration, we'll use a very simplified GGUF load.
+    logger.info(f"Example main for MetaInterpretationSynthesis: Processing model {args.model}")
+
+    # Basic logging setup for the example
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+
+
     from src.tensor_analysis.gguf_parser import GGUFParser
     gguf = GGUFParser(args.model)
     gguf.parse()
