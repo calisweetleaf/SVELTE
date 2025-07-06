@@ -46,8 +46,10 @@ def main():
 
     # 4. Quantization analysis
     quant_recon = QuantizationReconstructor(gguf.get_quantization())
-    dequantized_tensors = {name: quant_recon.simulate_dequantization(tensor) for name, tensor in tensor_field.items()}
-    quant_artifacts = {name: quant_recon.identify_artifacts(tensor) for name, tensor in tensor_field.items()}
+    dequantized_tensors = {name: quant_recon.simulate_dequantization(tensor_field.get_tensor(name)) 
+                          for name in tensor_field.tensors.keys()}
+    quant_artifacts = {name: quant_recon.identify_artifacts(tensor_field.get_tensor(name)) 
+                      for name in tensor_field.tensors.keys()}
 
     # 5. Activation simulation
     activation_sim = ActivationSpaceSimulator(dequantized_tensors)
