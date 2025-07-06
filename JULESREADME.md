@@ -177,3 +177,44 @@ After implementation, the framework should:
 - Maintain consistency with existing patterns and style
 - The framework design is solid - just need the implementations
 - All necessary imports and dependencies are already configured
+
+## Environment Setup for Jules
+
+### Recommended Setup Script
+
+Use the provided `setup_environment.sh` script which is optimized for Jules' VM environment:
+
+```bash
+# Primary setup script (recommended)
+bash setup_environment.sh
+
+# Alternative for containerized environments
+bash setup_jules.sh
+```
+
+### Environment Requirements
+
+- **Python**: 3.8+
+- **Key Dependencies**: numpy, scipy, matplotlib, networkx, scikit-learn, pandas
+- **Testing**: pytest, pytest-cov
+- **Development**: black, flake8, mypy
+
+### Jules-Specific Notes
+
+1. **Setup Scripts**: Two setup scripts are provided:
+   - `setup_environment.sh` - Main setup with comprehensive error handling
+   - `setup_jules.sh` - Simplified fallback for containerized environments
+
+2. **Virtual Environment**: The setup creates a `venv` directory with all dependencies
+
+3. **Path Configuration**: Python path is automatically configured for SVELTE modules
+
+4. **Verification**: Both scripts include comprehensive dependency verification
+
+### Environment Activation
+
+After setup, activate the environment:
+
+```bash
+source activate_svelte_env.sh
+```
