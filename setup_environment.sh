@@ -1,19 +1,19 @@
-#!/bin/bash
+#!/bin/sh
 
 # SVELTE Framework Environment Setup Script for Jules
 # This script configures the Python environment for the SVELTE Framework
-# Aligned with Jules Agent Deep Research Manual requirements
+# Aligned with Jules Agent Deep Research Manual requirements - POSIX compliant
 
 set -e  # Exit on any error
 
 echo "Setting up SVELTE Framework environment..."
 
 # Check if running as root or with sudo access
-if [[ $EUID -eq 0 ]]; then
+if [ "$(id -u)" -eq 0 ]; then
     echo "Running as root, updating system packages..."
     apt-get update -qq
     apt-get install -y python3 python3-pip python3-venv python3-dev build-essential
-elif command -v sudo &> /dev/null; then
+elif command -v sudo >/dev/null 2>&1; then
     echo "Using sudo for system package installation..."
     sudo apt-get update -qq
     sudo apt-get install -y python3 python3-pip python3-venv python3-dev build-essential
@@ -31,9 +31,9 @@ if [ ! -d "venv" ]; then
     python3 -m venv venv
 fi
 
-# Activate virtual environment
+# Activate virtual environment (POSIX-compliant)
 echo "Activating virtual environment..."
-source venv/bin/activate
+. venv/bin/activate
 
 # Upgrade pip to latest version
 echo "Upgrading pip..."
@@ -74,9 +74,9 @@ export SVELTE_VISUALIZATIONS_DIR=visualizations
 # Create a simple environment activation script for Jules
 echo "Creating environment activation script..."
 cat > activate_svelte_env.sh << 'EOF'
-#!/bin/bash
-# SVELTE Environment Activation Script
-source venv/bin/activate
+#!/bin/sh
+# SVELTE Environment Activation Script - POSIX compliant
+. venv/bin/activate
 export PYTHONPATH="${PYTHONPATH}:$(pwd):$(pwd)/src"
 export SVELTE_LOG_LEVEL=INFO
 export SVELTE_OUTPUT_DIR=output
@@ -179,7 +179,7 @@ print('\\nSVELTE module structure verification complete!')
 echo ""
 echo "=== SVELTE Framework Environment Setup Complete ==="
 echo "To activate this environment in the future, run:"
-echo "  source activate_svelte_env.sh"
+echo "  . activate_svelte_env.sh"
 echo ""
 echo "Ready for Jules to continue implementation!"
 echo "=== Setup Script Finished Successfully ==="

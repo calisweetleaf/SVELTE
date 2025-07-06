@@ -1,13 +1,13 @@
-#!/bin/bash
+#!/bin/sh
 
 # SVELTE Framework - Jules Agent Optimized Setup
-# Fallback setup script for Jules Agent VM environment
+# POSIX-compliant setup script for Jules Agent VM environment
 
 set -e
 
 echo "=== Jules Agent - SVELTE Framework Setup ==="
 
-# Check if we're in a container/VM environment
+# Check if we're in a container/VM environment (POSIX-compliant detection)
 if [ -f /.dockerenv ] || [ -n "${CONTAINER_ID}" ]; then
     echo "Detected containerized environment"
     CONTAINERIZED=true
@@ -23,14 +23,14 @@ if [ "$CONTAINERIZED" = true ]; then
     python3 --version || { echo "Python3 required but not found!"; exit 1; }
 else
     # Standard environment
-    if command -v python3 &> /dev/null; then
+    if command -v python3 >/dev/null 2>&1; then
         echo "Python3 found: $(python3 --version)"
     else
         echo "Python3 not found - attempting installation..."
-        if command -v apt-get &> /dev/null; then
+        if command -v apt-get >/dev/null 2>&1; then
             sudo apt-get update -qq
             sudo apt-get install -y python3 python3-pip python3-venv
-        elif command -v yum &> /dev/null; then
+        elif command -v yum >/dev/null 2>&1; then
             sudo yum install -y python3 python3-pip
         else
             echo "Cannot install Python3 automatically. Please install manually."
@@ -42,7 +42,10 @@ fi
 # Create and activate virtual environment
 echo "Creating virtual environment..."
 python3 -m venv venv
-source venv/bin/activate
+
+# Activate virtual environment (POSIX-compliant)
+echo "Activating virtual environment..."
+. venv/bin/activate
 
 # Install requirements
 echo "Installing Python dependencies..."
