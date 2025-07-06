@@ -1,8 +1,6 @@
 #!/bin/sh
 
-# SVELTE Framework Environment Setup Script for Jules
 # This script configures the Python environment for the SVELTE Framework
-# Aligned with Jules Agent Deep Research Manual requirements - POSIX compliant
 
 set -e  # Exit on any error
 
@@ -71,7 +69,7 @@ export SVELTE_CACHE_DIR=.cache
 export SVELTE_MODELS_DIR=models
 export SVELTE_VISUALIZATIONS_DIR=visualizations
 
-# Create a simple environment activation script for Jules
+# Create a simple environment activation script for convenience
 echo "Creating environment activation script..."
 cat > activate_svelte_env.sh << 'EOF'
 #!/bin/sh
@@ -181,5 +179,7 @@ echo "=== SVELTE Framework Environment Setup Complete ==="
 echo "To activate this environment in the future, run:"
 echo "  . activate_svelte_env.sh"
 echo ""
-echo "Ready for Jules to continue implementation!"
+echo "Remember to run this script in the SVELTE project directory."
+echo ""
+echo "For more information, refer to the SVELTE documentation."
 echo "=== Setup Script Finished Successfully ==="
