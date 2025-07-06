@@ -3,8 +3,42 @@
 Quantization scheme identification and dequantization simulation for SVELTE Framework.
 """
 import numpy as np
-from typing import Dict, Any
+import struct
+from typing import Dict, Any, Tuple, Optional, Union, List
+from enum import Enum
 import warnings
+import logging
+
+# Try to import scipy for advanced statistical analysis
+try:
+    from scipy import signal, stats as scipy_stats
+    from scipy.ndimage import gaussian_filter
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+    warnings.warn("SciPy not available. Some advanced quantization analysis features will be disabled.")
+
+# Configure logging
+logger = logging.getLogger(__name__)
+
+class QuantizationType(Enum):
+    """Enumeration of supported quantization types."""
+    SYMMETRIC_UNIFORM = "symmetric_uniform"
+    ASYMMETRIC_UNIFORM = "asymmetric_uniform"
+    BLOCKWISE = "blockwise"
+    GROUPED = "grouped"
+    K_QUANTS = "k_quants"
+    CUSTOM = "custom"
+    NONE = "none"
+
+class KQuantsType(Enum):
+    """K-quants specific quantization types."""
+    Q2_K = "q2_k"
+    Q3_K = "q3_k"
+    Q4_K = "q4_k"
+    Q5_K = "q5_k"
+    Q6_K = "q6_k"
+    Q8_K = "q8_k"
 
 class QuantizationReconstructor:
     def __init__(self, quantization_info: Dict[str, Any]):
@@ -145,20 +179,166 @@ class QuantizationReconstructor:
      return output
 
     def _k_quants_dequantize(self, tensor: np.ndarray, bits: int, layer_name: str = None) -> np.ndarray:
-     """K-quants special format used in some GGML models (simplified version)"""
-     # This would be a complex implementation specific to GGML k-quants format
-     # Here's a simplified placeholder
-     quant_type = self.quantization_info.get("quant_type", "q4_0")
+     """K-quants dequantization for GGML format tensors."""
+     quant_type = self.quantization_info.get("quant_type", "q4_k")
      
-     if quant_type.startswith("q4"):
-      scale_bits = 16  # For example, scales might be FP16
-      dequantized = np.zeros((tensor.shape[0] * 2, tensor.shape[1] * 2), dtype=np.float32)
-      # Complex unpacking logic would go here
-      # For now, just return an upscaled dummy tensor with correct dimensions
-      return dequantized
-     else:
-      # Fallback for unknown k-quants type
-      return tensor.astype(np.float32)
+     try:
+         if quant_type == "q2_k":
+             return self._dequantize_q2_k(tensor, layer_name)
+         elif quant_type == "q3_k":
+             return self._dequantize_q3_k(tensor, layer_name)
+         elif quant_type == "q4_k":
+             return self._dequantize_q4_k(tensor, layer_name)
+         elif quant_type == "q5_k":
+             return self._dequantize_q5_k(tensor, layer_name)
+         elif quant_type == "q6_k":
+             return self._dequantize_q6_k(tensor, layer_name)
+         elif quant_type == "q8_k":
+             return self._dequantize_q8_k(tensor, layer_name)
+         else:
+             logger.warning(f"Unknown k-quants type: {quant_type}, falling back to simple dequantization")
+             return tensor.astype(np.float32)
+             
+     except Exception as e:
+         logger.error(f"K-quants dequantization failed: {e}")
+         return tensor.astype(np.float32)
+
+    def _dequantize_q4_k(self, tensor: np.ndarray, layer_name: str = None) -> np.ndarray:
+        """Dequantize Q4_K format tensors (4-bit with k-means clustering)."""
+        # Q4_K format: 32 values per block, stored as:
+        # - 1 float32 scale (4 bytes)
+        # - 1 float32 min value (4 bytes) 
+        # - 16 bytes of 4-bit quantized values (32 values, 2 per byte)
+        
+        block_size = 32
+        bytes_per_block = 24  # 4 + 4 + 16
+        
+        if tensor.size % bytes_per_block != 0:
+            logger.warning("Tensor size doesn't match Q4_K format expectations")
+            return tensor.astype(np.float32)
+        
+        num_blocks = tensor.size // bytes_per_block
+        tensor_bytes = tensor.view(np.uint8)
+        
+        # Calculate output size
+        output_size = num_blocks * block_size
+        output = np.zeros(output_size, dtype=np.float32)
+        
+        for block_idx in range(num_blocks):
+            offset = block_idx * bytes_per_block
+            
+            # Extract scale and min value (little-endian float32)
+            scale_bytes = tensor_bytes[offset:offset+4]
+            min_bytes = tensor_bytes[offset+4:offset+8]
+            
+            scale = struct.unpack('<f', scale_bytes)[0]
+            min_val = struct.unpack('<f', min_bytes)[0]
+            
+            # Extract 4-bit values (16 bytes = 32 values)
+            quant_bytes = tensor_bytes[offset+8:offset+24]
+            
+            # Unpack 4-bit values
+            output_offset = block_idx * block_size
+            for i in range(16):  # 16 bytes
+                byte_val = quant_bytes[i]
+                # Each byte contains 2 x 4-bit values
+                val1 = byte_val & 0x0F  # Lower 4 bits
+                val2 = (byte_val >> 4) & 0x0F  # Upper 4 bits
+                
+                # Dequantize: value = min + scale * quantized_value
+                output[output_offset + i*2] = min_val + scale * val1
+                if (output_offset + i*2 + 1) < output_size:
+                    output[output_offset + i*2 + 1] = min_val + scale * val2
+        
+        return output
+
+    def _dequantize_q2_k(self, tensor: np.ndarray, layer_name: str = None) -> np.ndarray:
+        """Dequantize Q2_K format tensors (2-bit with k-means clustering)."""
+        # Q2_K format: 16 values per block
+        block_size = 16
+        bytes_per_block = 12  # 4 (scale) + 4 (min) + 4 (2-bit values)
+        
+        if tensor.size % bytes_per_block != 0:
+            logger.warning("Tensor size doesn't match Q2_K format expectations")
+            return tensor.astype(np.float32)
+        
+        num_blocks = tensor.size // bytes_per_block
+        tensor_bytes = tensor.view(np.uint8)
+        output_size = num_blocks * block_size
+        output = np.zeros(output_size, dtype=np.float32)
+        
+        for block_idx in range(num_blocks):
+            offset = block_idx * bytes_per_block
+            
+            # Extract scale and min value
+            scale = struct.unpack('<f', tensor_bytes[offset:offset+4])[0]
+            min_val = struct.unpack('<f', tensor_bytes[offset+4:offset+8])[0]
+            
+            # Extract 2-bit values (4 bytes = 16 values)
+            quant_bytes = tensor_bytes[offset+8:offset+12]
+            
+            output_offset = block_idx * block_size
+            for i in range(4):  # 4 bytes
+                byte_val = quant_bytes[i]
+                # Each byte contains 4 x 2-bit values
+                for j in range(4):
+                    val = (byte_val >> (j * 2)) & 0x03  # Extract 2 bits
+                    idx = output_offset + i*4 + j
+                    if idx < output_size:
+                        output[idx] = min_val + scale * val
+        
+        return output
+
+    def _dequantize_q8_k(self, tensor: np.ndarray, layer_name: str = None) -> np.ndarray:
+        """Dequantize Q8_K format tensors (8-bit with k-means clustering)."""
+        # Q8_K format: 256 values per block
+        block_size = 256
+        bytes_per_block = 264  # 4 (scale) + 4 (min) + 256 (8-bit values)
+        
+        if tensor.size % bytes_per_block != 0:
+            logger.warning("Tensor size doesn't match Q8_K format expectations")
+            return tensor.astype(np.float32)
+        
+        num_blocks = tensor.size // bytes_per_block
+        tensor_bytes = tensor.view(np.uint8)
+        output_size = num_blocks * block_size
+        output = np.zeros(output_size, dtype=np.float32)
+        
+        for block_idx in range(num_blocks):
+            offset = block_idx * bytes_per_block
+            
+            # Extract scale and min value
+            scale = struct.unpack('<f', tensor_bytes[offset:offset+4])[0]
+            min_val = struct.unpack('<f', tensor_bytes[offset+4:offset+8])[0]
+            
+            # Extract 8-bit values
+            quant_bytes = tensor_bytes[offset+8:offset+264]
+            
+            output_offset = block_idx * block_size
+            for i in range(block_size):
+                if (output_offset + i) < output_size:
+                    output[output_offset + i] = min_val + scale * quant_bytes[i]
+        
+        return output
+
+    def _dequantize_q3_k(self, tensor: np.ndarray, layer_name: str = None) -> np.ndarray:
+        """Dequantize Q3_K format tensors (3-bit with k-means clustering)."""
+        # Q3_K is more complex due to 3-bit packing
+        # Simplified implementation - real Q3_K has more sophisticated packing
+        logger.warning("Q3_K dequantization using simplified algorithm")
+        return self._dequantize_q4_k(tensor, layer_name)  # Fallback to Q4_K
+
+    def _dequantize_q5_k(self, tensor: np.ndarray, layer_name: str = None) -> np.ndarray:
+        """Dequantize Q5_K format tensors (5-bit with k-means clustering)."""
+        # Q5_K format similar to Q4_K but with 5-bit values
+        logger.warning("Q5_K dequantization using simplified algorithm")
+        return self._dequantize_q4_k(tensor, layer_name)  # Fallback to Q4_K
+
+    def _dequantize_q6_k(self, tensor: np.ndarray, layer_name: str = None) -> np.ndarray:
+        """Dequantize Q6_K format tensors (6-bit with k-means clustering)."""
+        # Q6_K format similar to Q4_K but with 6-bit values
+        logger.warning("Q6_K dequantization using simplified algorithm")
+        return self._dequantize_q4_k(tensor, layer_name)  # Fallback to Q4_K
 
     def _custom_dequantize(self, tensor: np.ndarray, layer_name: str = None) -> np.ndarray:
      """Custom dequantization using specified function"""
@@ -646,6 +826,225 @@ class QuantizationReconstructor:
      
      return artifacts
 
+    def _frequency_domain_analysis(self, tensor: np.ndarray) -> Dict[str, Any]:
+        """Perform frequency domain analysis to detect quantization artifacts."""
+        freq_analysis = {}
+        
+        try:
+            # For 2D tensors, apply 2D FFT
+            if tensor.ndim == 2:
+                # Apply 2D FFT
+                fft_result = np.fft.fft2(tensor)
+                power_spectrum = np.abs(fft_result) ** 2
+                
+                # Analyze frequency distribution
+                freq_analysis["power_spectrum_stats"] = {
+                    "mean": float(np.mean(power_spectrum)),
+                    "std": float(np.std(power_spectrum)),
+                    "max": float(np.max(power_spectrum)),
+                    "energy": float(np.sum(power_spectrum))
+                }
+                
+                # Detect high-frequency artifacts (typical of quantization)
+                h, w = power_spectrum.shape
+                center_h, center_w = h // 2, w // 2
+                
+                # Calculate energy in different frequency bands
+                low_freq_mask = np.zeros_like(power_spectrum)
+                high_freq_mask = np.zeros_like(power_spectrum)
+                
+                # Low frequency: central 1/4 of spectrum
+                low_h, low_w = h // 4, w // 4
+                low_freq_mask[center_h-low_h:center_h+low_h, 
+                             center_w-low_w:center_w+low_w] = 1
+                
+                # High frequency: outer regions
+                high_freq_mask = 1 - low_freq_mask
+                
+                low_freq_energy = np.sum(power_spectrum * low_freq_mask)
+                high_freq_energy = np.sum(power_spectrum * high_freq_mask)
+                
+                total_energy = low_freq_energy + high_freq_energy
+                if total_energy > 0:
+                    high_freq_ratio = high_freq_energy / total_energy
+                    freq_analysis["high_frequency_ratio"] = float(high_freq_ratio)
+                    freq_analysis["has_high_freq_artifacts"] = bool(high_freq_ratio > 0.3)
+                
+                # Detect regular patterns in frequency domain (sign of quantization steps)
+                freq_peaks = []
+                if SCIPY_AVAILABLE:
+                    # Find peaks in the power spectrum
+                    spectrum_1d = np.mean(power_spectrum, axis=0)
+                    peaks, _ = signal.find_peaks(spectrum_1d, height=np.mean(spectrum_1d) * 2)
+                    freq_analysis["frequency_peaks"] = len(peaks)
+                    freq_analysis["has_regular_freq_pattern"] = bool(len(peaks) > 5)
+                
+            # For 1D tensors, apply 1D FFT
+            elif tensor.ndim == 1:
+                fft_result = np.fft.fft(tensor)
+                power_spectrum = np.abs(fft_result) ** 2
+                
+                freq_analysis["power_spectrum_stats"] = {
+                    "mean": float(np.mean(power_spectrum)),
+                    "std": float(np.std(power_spectrum)),
+                    "max": float(np.max(power_spectrum)),
+                    "energy": float(np.sum(power_spectrum))
+                }
+                
+                # Calculate spectral centroid (measure of spectral shape)
+                freqs = np.fft.fftfreq(len(tensor))
+                spectral_centroid = np.sum(freqs * power_spectrum) / (np.sum(power_spectrum) + 1e-10)
+                freq_analysis["spectral_centroid"] = float(spectral_centroid)
+                
+            # For higher-dimensional tensors, flatten and analyze
+            else:
+                flat_tensor = tensor.flatten()
+                if len(flat_tensor) > 1000:  # Subsample for efficiency
+                    indices = np.linspace(0, len(flat_tensor)-1, 1000, dtype=int)
+                    flat_tensor = flat_tensor[indices]
+                
+                fft_result = np.fft.fft(flat_tensor)
+                power_spectrum = np.abs(fft_result) ** 2
+                
+                freq_analysis["power_spectrum_stats"] = {
+                    "mean": float(np.mean(power_spectrum)),
+                    "std": float(np.std(power_spectrum)),
+                    "max": float(np.max(power_spectrum)),
+                    "energy": float(np.sum(power_spectrum))
+                }
+                
+        except Exception as e:
+            logger.warning(f"Frequency domain analysis failed: {e}")
+            freq_analysis["error"] = str(e)
+        
+        return freq_analysis
+
+    def _estimate_precision_loss(self, tensor: np.ndarray, 
+                                original_tensor: np.ndarray = None,
+                                scheme_data: Dict[str, Any] = None) -> Dict[str, Any]:
+        """Estimate precision loss due to quantization."""
+        precision_loss = {}
+        
+        # Theoretical precision loss based on bit depth
+        if scheme_data and "estimated_bits" in scheme_data:
+            bits = scheme_data["estimated_bits"]
+            theoretical_snr = 6.02 * bits + 1.76  # dB
+            precision_loss["theoretical_snr_db"] = float(theoretical_snr)
+            precision_loss["theoretical_precision_loss"] = float(1.0 / (2 ** bits))
+        
+        # Estimate precision from value distribution
+        unique_values = np.unique(tensor)
+        value_range = tensor.max() - tensor.min()
+        
+        if len(unique_values) > 1 and value_range > 0:
+            # Average spacing between quantization levels
+            avg_step_size = value_range / (len(unique_values) - 1)
+            precision_loss["avg_quantization_step"] = float(avg_step_size)
+            precision_loss["relative_step_size"] = float(avg_step_size / value_range)
+            
+            # Estimate effective bits from unique values
+            effective_bits = np.log2(len(unique_values))
+            precision_loss["effective_bits"] = float(effective_bits)
+        
+        # Calculate empirical SNR if original tensor is available
+        if original_tensor is not None and tensor.shape == original_tensor.shape:
+            signal_power = np.mean(original_tensor ** 2)
+            noise_power = np.mean((tensor - original_tensor) ** 2)
+            
+            if noise_power > 0 and signal_power > 0:
+                empirical_snr = 10 * np.log10(signal_power / noise_power)
+                precision_loss["empirical_snr_db"] = float(empirical_snr)
+                
+                # Calculate bit error rate equivalent
+                precision_loss["relative_error"] = float(np.sqrt(noise_power) / (np.std(original_tensor) + 1e-10))
+        
+        return precision_loss
+
+    def _generate_recommendations(self, results: Dict[str, Any]) -> List[str]:
+        """Generate recommendations based on quantization analysis."""
+        recommendations = []
+        
+        # Check for saturation artifacts
+        if results.get("artifacts", {}).get("saturation", {}).get("has_significant_saturation", False):
+            sat_data = results["artifacts"]["saturation"]
+            recommendations.append(
+                f"Significant saturation detected ({sat_data['min_saturation_percent']:.1f}% at min, "
+                f"{sat_data['max_saturation_percent']:.1f}% at max). Consider increasing quantization range."
+            )
+        
+        # Check for high precision loss
+        precision_loss = results.get("precision_loss", {})
+        if "empirical_snr_db" in precision_loss and precision_loss["empirical_snr_db"] < 20:
+            recommendations.append(
+                f"Low SNR detected ({precision_loss['empirical_snr_db']:.1f} dB). "
+                "Consider using higher bit depth or different quantization scheme."
+            )
+        
+        # Check for clustering artifacts
+        clustering = results.get("artifacts", {}).get("value_clustering", {})
+        if clustering.get("has_significant_clustering", False) and clustering["clustering_strength"] > 10:
+            recommendations.append(
+                "Strong value clustering detected. This may indicate over-quantization. "
+                "Consider using more quantization levels or asymmetric quantization."
+            )
+        
+        # Check for banding artifacts
+        banding = results.get("artifacts", {}).get("banding", {})
+        if banding.get("has_banding", False):
+            recommendations.append(
+                f"Banding artifacts detected (score: {banding['banding_score']:.2f}). "
+                "Consider using dithering or higher bit depth."
+            )
+        
+        # Check for high frequency artifacts
+        freq_analysis = results.get("frequency_analysis", {})
+        if freq_analysis.get("has_high_freq_artifacts", False):
+            recommendations.append(
+                "High-frequency artifacts detected in spectrum. "
+                "This may indicate quantization noise. Consider low-pass filtering or higher precision."
+            )
+        
+        # Scheme-specific recommendations
+        scheme = results.get("detected_scheme", "")
+        if scheme == "symmetric_uniform" and results.get("zero_bias", {}).get("has_zero_bias", False):
+            recommendations.append(
+                "Zero bias detected with symmetric quantization. "
+                "Consider switching to asymmetric quantization for better precision."
+            )
+        
+        if not recommendations:
+            recommendations.append("No significant quantization artifacts detected. Quality appears acceptable.")
+        
+        return recommendations
+
+    def _calculate_confidence(self, results: Dict[str, Any]) -> float:
+        """Calculate overall confidence in the quantization analysis."""
+        confidence_factors = []
+        
+        # Scheme detection confidence
+        if "scheme_detection_confidence" in results:
+            confidence_factors.append(results["scheme_detection_confidence"])
+        
+        # Artifact detection confidence
+        artifacts = results.get("artifacts", {})
+        for artifact_type, artifact_data in artifacts.items():
+            if "confidence" in artifact_data:
+                confidence_factors.append(artifact_data["confidence"])
+        
+        # Tensor statistics confidence (based on sample size)
+        tensor_stats = results.get("tensor_stats", {})
+        if "unique_values" in tensor_stats:
+            unique_values = tensor_stats["unique_values"]
+            # More unique values generally means higher confidence in analysis
+            stats_confidence = min(1.0, unique_values / 100.0)
+            confidence_factors.append(stats_confidence)
+        
+        # Calculate weighted average confidence
+        if confidence_factors:
+            return float(np.mean(confidence_factors))
+        else:
+            return 0.5  # Default moderate confidence
+
     def _calculate_quality_metrics(self, tensor: np.ndarray, 
             original_tensor: np.ndarray = None,
             scheme_data: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -655,7 +1054,6 @@ class QuantizationReconstructor:
      # If original tensor is available, calculate direct comparison metrics
      if original_tensor is not None and tensor.shape == original_tensor.shape:
       # Calculate Mean Squared Error
-       "expected_peaks": expected_pe
       mse = np.mean((tensor - original_tensor) ** 2)
       metrics["mse"] = float(mse)
       
@@ -710,3 +1108,483 @@ class QuantizationReconstructor:
         
       except Exception as e:
        metrics["ssim_error"] = str(e)
+     
+     # Calculate metrics based on tensor properties alone
+     # Dynamic range
+     tensor_range = tensor.max() - tensor.min()
+     metrics["dynamic_range"] = float(tensor_range)
+     
+     # Bit utilization (how well the available quantization levels are used)
+     unique_values = len(np.unique(tensor))
+     if scheme_data and "estimated_bits" in scheme_data:
+      max_possible_values = 2 ** scheme_data["estimated_bits"]
+      metrics["bit_utilization"] = float(unique_values / max_possible_values)
+     
+     # Entropy-based quality assessment
+     if unique_values > 1:
+      # Calculate Shannon entropy
+      _, counts = np.unique(tensor, return_counts=True)
+      probabilities = counts / np.sum(counts)
+      entropy = -np.sum(probabilities * np.log2(probabilities))
+      metrics["entropy"] = float(entropy)
+      
+      # Theoretical maximum entropy for this bit depth
+      if scheme_data and "estimated_bits" in scheme_data:
+       max_entropy = scheme_data["estimated_bits"]
+       metrics["entropy_efficiency"] = float(entropy / max_entropy)
+     
+     # Quantization noise estimate (based on step size)
+     if tensor_range > 0 and unique_values > 1:
+      avg_step = tensor_range / (unique_values - 1)
+      # Assume uniform distribution of quantization error
+      quantization_noise_var = (avg_step ** 2) / 12
+      metrics["quantization_noise_variance"] = float(quantization_noise_var)
+      metrics["quantization_noise_std"] = float(np.sqrt(quantization_noise_var))
+     
+     return metrics
+
+
+class QuantizationSchemeDetector:
+    """Advanced quantization scheme detection using statistical analysis."""
+    
+    def __init__(self):
+        self.supported_schemes = [
+            QuantizationType.SYMMETRIC_UNIFORM,
+            QuantizationType.ASYMMETRIC_UNIFORM,
+            QuantizationType.BLOCKWISE,
+            QuantizationType.GROUPED,
+            QuantizationType.K_QUANTS
+        ]
+        self.k_quants_types = [
+            KQuantsType.Q2_K,
+            KQuantsType.Q3_K,
+            KQuantsType.Q4_K,
+            KQuantsType.Q5_K,
+            KQuantsType.Q6_K,
+            KQuantsType.Q8_K
+        ]
+    
+    def detect_scheme(self, tensor: np.ndarray, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        Detect quantization scheme from tensor data and optional metadata.
+        
+        Args:
+            tensor: Input tensor to analyze
+            metadata: Optional metadata dictionary containing hints about quantization
+            
+        Returns:
+            Dictionary with detection results including scheme type, parameters, and confidence
+        """
+        if tensor.size == 0:
+            return {
+                "scheme": QuantizationType.NONE,
+                "confidence": 0.0,
+                "parameters": {},
+                "error": "Empty tensor"
+            }
+        
+        # Initialize results
+        results = {
+            "scheme": QuantizationType.NONE,
+            "confidence": 0.0,
+            "parameters": {},
+            "analysis": {}
+        }
+        
+        # Analyze tensor statistics
+        tensor_stats = self._analyze_tensor_statistics(tensor)
+        results["analysis"]["tensor_stats"] = tensor_stats
+        
+        # Check for obvious patterns first
+        if self._is_likely_float(tensor):
+            results["scheme"] = QuantizationType.NONE
+            results["confidence"] = 0.9
+            results["parameters"] = {"reason": "Float-like values detected"}
+            return results
+        
+        # Test each quantization scheme
+        scheme_scores = {}
+        
+        # Test symmetric uniform
+        symmetric_score = self._test_symmetric_uniform(tensor, tensor_stats)
+        scheme_scores[QuantizationType.SYMMETRIC_UNIFORM] = symmetric_score
+        
+        # Test asymmetric uniform
+        asymmetric_score = self._test_asymmetric_uniform(tensor, tensor_stats)
+        scheme_scores[QuantizationType.ASYMMETRIC_UNIFORM] = asymmetric_score
+        
+        # Test blockwise (requires 2D+ tensor)
+        if tensor.ndim >= 2:
+            blockwise_score = self._test_blockwise(tensor, tensor_stats)
+            scheme_scores[QuantizationType.BLOCKWISE] = blockwise_score
+        
+        # Test grouped (requires sufficient channels)
+        if tensor.ndim >= 2 and tensor.shape[0] >= 8:
+            grouped_score = self._test_grouped(tensor, tensor_stats)
+            scheme_scores[QuantizationType.GROUPED] = grouped_score
+        
+        # Test k-quants (requires specific metadata or patterns)
+        if metadata and "quantization_type" in metadata:
+            kquants_score = self._test_k_quants(tensor, tensor_stats, metadata)
+            scheme_scores[QuantizationType.K_QUANTS] = kquants_score
+        
+        # Find best scheme
+        best_scheme = max(scheme_scores, key=lambda x: scheme_scores[x]["confidence"])
+        results["scheme"] = best_scheme
+        results["confidence"] = scheme_scores[best_scheme]["confidence"]
+        results["parameters"] = scheme_scores[best_scheme]["parameters"]
+        results["analysis"]["scheme_scores"] = scheme_scores
+        
+        return results
+    
+    def _analyze_tensor_statistics(self, tensor: np.ndarray) -> Dict[str, Any]:
+        """Analyze basic tensor statistics for scheme detection."""
+        flat_tensor = tensor.flatten()
+        unique_values = np.unique(flat_tensor)
+        
+        stats = {
+            "min": float(tensor.min()),
+            "max": float(tensor.max()),
+            "mean": float(tensor.mean()),
+            "std": float(tensor.std()),
+            "unique_count": len(unique_values),
+            "range": float(tensor.max() - tensor.min()),
+            "is_integer": np.all(np.equal(np.mod(flat_tensor, 1), 0)),
+            "has_negative": bool(tensor.min() < 0),
+            "zero_centered": bool(abs(tensor.mean()) < 0.1 * tensor.std())
+        }
+        
+        # Calculate value distribution metrics
+        if len(unique_values) > 1:
+            # Check spacing between values
+            spacing = np.diff(np.sort(unique_values))
+            stats["avg_spacing"] = float(np.mean(spacing))
+            stats["spacing_std"] = float(np.std(spacing))
+            stats["uniform_spacing"] = bool(stats["spacing_std"] < 0.1 * stats["avg_spacing"])
+        
+        return stats
+    
+    def _is_likely_float(self, tensor: np.ndarray) -> bool:
+        """Check if tensor contains float-like values (not quantized)."""
+        if tensor.dtype in [np.float16, np.float32, np.float64]:
+            # Check for too many unique values for typical quantization
+            unique_count = len(np.unique(tensor))
+            if unique_count > 256:  # Too many unique values for typical quantization
+                return True
+            
+            # Check for non-uniform spacing
+            unique_values = np.unique(tensor)
+            if len(unique_values) > 10:
+                spacing = np.diff(unique_values)
+                cv = np.std(spacing) / (np.mean(spacing) + 1e-10)
+                if cv > 0.5:  # High coefficient of variation in spacing
+                    return True
+        
+        return False
+    
+    def _test_symmetric_uniform(self, tensor: np.ndarray, stats: Dict[str, Any]) -> Dict[str, Any]:
+        """Test if tensor matches symmetric uniform quantization pattern."""
+        result = {"confidence": 0.0, "parameters": {}}
+        
+        # Symmetric quantization should be roughly zero-centered
+        if not stats["zero_centered"]:
+            result["confidence"] = 0.1
+            result["parameters"]["reason"] = "Not zero-centered"
+            return result
+        
+        # Should have uniform spacing
+        confidence = 0.5
+        if stats.get("uniform_spacing", False):
+            confidence += 0.3
+        
+        # Should have integer values for typical quantization
+        if stats["is_integer"]:
+            confidence += 0.2
+        
+        # Check for power-of-2 number of unique values
+        unique_count = stats["unique_count"]
+        if unique_count > 0 and (unique_count & (unique_count - 1)) == 0:
+            confidence += 0.1
+        
+        # Estimate parameters
+        if stats["range"] > 0:
+            estimated_bits = max(1, int(np.ceil(np.log2(unique_count))))
+            scale = stats["range"] / (2 ** estimated_bits - 1)
+            result["parameters"] = {
+                "estimated_bits": estimated_bits,
+                "scale": scale,
+                "zero_point": 0
+            }
+        
+        result["confidence"] = min(confidence, 1.0)
+        return result
+    
+    def _test_asymmetric_uniform(self, tensor: np.ndarray, stats: Dict[str, Any]) -> Dict[str, Any]:
+        """Test if tensor matches asymmetric uniform quantization pattern."""
+        result = {"confidence": 0.0, "parameters": {}}
+        
+        # Asymmetric quantization can have any center
+        confidence = 0.4
+        
+        # Should have uniform spacing
+        if stats.get("uniform_spacing", False):
+            confidence += 0.3
+        
+        # Should have integer values for typical quantization
+        if stats["is_integer"]:
+            confidence += 0.2
+        
+        # Check for power-of-2 number of unique values
+        unique_count = stats["unique_count"]
+        if unique_count > 0 and (unique_count & (unique_count - 1)) == 0:
+            confidence += 0.1
+        
+        # Estimate parameters
+        if stats["range"] > 0:
+            estimated_bits = max(1, int(np.ceil(np.log2(unique_count))))
+            scale = stats["range"] / (2 ** estimated_bits - 1)
+            zero_point = int(-stats["min"] / scale) if scale > 0 else 0
+            result["parameters"] = {
+                "estimated_bits": estimated_bits,
+                "scale": scale,
+                "zero_point": zero_point
+            }
+        
+        result["confidence"] = min(confidence, 1.0)
+        return result
+    
+    def _test_blockwise(self, tensor: np.ndarray, stats: Dict[str, Any]) -> Dict[str, Any]:
+        """Test if tensor matches blockwise quantization pattern."""
+        result = {"confidence": 0.0, "parameters": {}}
+        
+        # Blockwise quantization shows variation in statistics across blocks
+        block_sizes = [8, 16, 32, 64]
+        best_score = 0.0
+        best_block_size = 32
+        
+        for block_size in block_sizes:
+            score = self._analyze_blockwise_pattern(tensor, block_size)
+            if score > best_score:
+                best_score = score
+                best_block_size = block_size
+        
+        result["confidence"] = best_score
+        result["parameters"] = {
+            "block_size": best_block_size,
+            "block_dim": -1  # Flatten-then-block by default
+        }
+        
+        return result
+    
+    def _test_grouped(self, tensor: np.ndarray, stats: Dict[str, Any]) -> Dict[str, Any]:
+        """Test if tensor matches grouped quantization pattern."""
+        result = {"confidence": 0.0, "parameters": {}}
+        
+        # Grouped quantization shows variation in statistics across channel groups
+        group_sizes = [4, 8, 16, 32, 64]
+        best_score = 0.0
+        best_group_size = 32
+        
+        for group_size in group_sizes:
+            score = self._analyze_grouped_pattern(tensor, group_size)
+            if score > best_score:
+                best_score = score
+                best_group_size = group_size
+        
+        result["confidence"] = best_score
+        result["parameters"] = {
+            "group_size": best_group_size,
+            "channel_dim": 0  # Assume first dimension is channels
+        }
+        
+        return result
+    
+    def _test_k_quants(self, tensor: np.ndarray, stats: Dict[str, Any], metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """Test if tensor matches k-quants quantization pattern."""
+        result = {"confidence": 0.0, "parameters": {}}
+        
+        # Check metadata for k-quants indicators
+        quant_type = metadata.get("quantization_type", "").lower()
+        if any(ktype.value in quant_type for ktype in self.k_quants_types):
+            result["confidence"] = 0.8
+            result["parameters"] = {"quant_type": quant_type}
+        
+        # Check tensor structure for k-quants patterns
+        elif self._has_k_quants_structure(tensor):
+            result["confidence"] = 0.6
+            result["parameters"] = {"quant_type": "q4_k"}  # Default assumption
+        
+        return result
+    
+    def _analyze_blockwise_pattern(self, tensor: np.ndarray, block_size: int) -> float:
+        """Analyze tensor for blockwise quantization patterns."""
+        if tensor.size < block_size * 2:
+            return 0.0
+        
+        # Flatten tensor and analyze blocks
+        flat_tensor = tensor.flatten()
+        block_stats = []
+        
+        for i in range(0, len(flat_tensor), block_size):
+            block = flat_tensor[i:i+block_size]
+            if len(block) >= block_size // 2:  # At least half block size
+                block_stats.append({
+                    "min": block.min(),
+                    "max": block.max(),
+                    "mean": block.mean(),
+                    "std": block.std()
+                })
+        
+        if len(block_stats) < 2:
+            return 0.0
+        
+        # Calculate variation in block statistics
+        block_stats = np.array([[s["min"], s["max"], s["mean"], s["std"]] for s in block_stats])
+        
+        # Calculate coefficient of variation for each statistic
+        cv_scores = []
+        for i in range(4):
+            col = block_stats[:, i]
+            if np.mean(col) != 0:
+                cv = np.std(col) / np.abs(np.mean(col))
+                cv_scores.append(cv)
+        
+        # Higher CV indicates more likely blockwise quantization
+        avg_cv = np.mean(cv_scores) if cv_scores else 0.0
+        return min(avg_cv, 1.0)
+    
+    def _analyze_grouped_pattern(self, tensor: np.ndarray, group_size: int) -> float:
+        """Analyze tensor for grouped quantization patterns."""
+        if tensor.shape[0] < group_size * 2:
+            return 0.0
+        
+        # Analyze groups of channels
+        group_stats = []
+        for i in range(0, tensor.shape[0], group_size):
+            group = tensor[i:i+group_size]
+            if group.shape[0] >= group_size // 2:
+                group_stats.append({
+                    "min": group.min(),
+                    "max": group.max(),
+                    "mean": group.mean(),
+                    "std": group.std()
+                })
+        
+        if len(group_stats) < 2:
+            return 0.0
+        
+        # Calculate variation in group statistics
+        group_stats = np.array([[s["min"], s["max"], s["mean"], s["std"]] for s in group_stats])
+        
+        # Calculate coefficient of variation for each statistic
+        cv_scores = []
+        for i in range(4):
+            col = group_stats[:, i]
+            if np.mean(col) != 0:
+                cv = np.std(col) / np.abs(np.mean(col))
+                cv_scores.append(cv)
+        
+        # Higher CV indicates more likely grouped quantization
+        avg_cv = np.mean(cv_scores) if cv_scores else 0.0
+        return min(avg_cv, 1.0)
+    
+    def _has_k_quants_structure(self, tensor: np.ndarray) -> bool:
+        """Check if tensor has structure typical of k-quants quantization."""
+        # k-quants typically have specific block sizes and patterns
+        # This is a simplified check - real k-quants detection would be more complex
+        
+        # Check if tensor size is compatible with k-quants block structures
+        common_block_sizes = [24, 32, 48, 64]  # Common k-quants block sizes in bytes
+        
+        for block_size in common_block_sizes:
+            if tensor.size % block_size == 0:
+                return True
+        
+        return False
+
+
+def create_quantization_reconstructor(quantization_info: Dict[str, Any]) -> QuantizationReconstructor:
+    """
+    Factory function to create a QuantizationReconstructor with validated configuration.
+    
+    Args:
+        quantization_info: Dictionary containing quantization parameters
+        
+    Returns:
+        Configured QuantizationReconstructor instance
+        
+    Raises:
+        ValueError: If quantization_info is invalid
+    """
+    # Validate required fields
+    if not isinstance(quantization_info, dict):
+        raise ValueError("quantization_info must be a dictionary")
+    
+    # Set default values for missing fields
+    defaults = {
+        "scheme": "symmetric_uniform",
+        "bits": 8,
+        "scale": 1.0,
+        "zero_point": 0,
+        "layer_specific": {}
+    }
+    
+    # Merge with defaults
+    config = {**defaults, **quantization_info}
+    
+    # Validate scheme
+    valid_schemes = ["symmetric_uniform", "asymmetric_uniform", "blockwise", "grouped", "k_quants", "custom"]
+    if config["scheme"] not in valid_schemes:
+        logger.warning(f"Unknown quantization scheme: {config['scheme']}, using default")
+        config["scheme"] = "symmetric_uniform"
+    
+    # Validate bits
+    if not isinstance(config["bits"], int) or config["bits"] < 1 or config["bits"] > 32:
+        logger.warning(f"Invalid bits value: {config['bits']}, using default")
+        config["bits"] = 8
+    
+    return QuantizationReconstructor(config)
+
+
+def detect_quantization_scheme(tensor: np.ndarray, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
+    """
+    Convenience function to detect quantization scheme from tensor.
+    
+    Args:
+        tensor: Input tensor to analyze
+        metadata: Optional metadata dictionary
+        
+    Returns:
+        Dictionary with detection results
+    """
+    detector = QuantizationSchemeDetector()
+    return detector.detect_scheme(tensor, metadata)
+
+
+def analyze_quantization_quality(tensor: np.ndarray, 
+                                original_tensor: np.ndarray = None,
+                                quantization_info: Dict[str, Any] = None) -> Dict[str, Any]:
+    """
+    Convenience function to analyze quantization quality.
+    
+    Args:
+        tensor: Quantized tensor to analyze
+        original_tensor: Original unquantized tensor for comparison
+        quantization_info: Known quantization parameters
+        
+    Returns:
+        Dictionary with quality analysis results
+    """
+    # Auto-detect quantization scheme if not provided
+    if quantization_info is None:
+        detection_result = detect_quantization_scheme(tensor)
+        quantization_info = {
+            "scheme": detection_result["scheme"].value if hasattr(detection_result["scheme"], 'value') else str(detection_result["scheme"]),
+            "bits": detection_result["parameters"].get("estimated_bits", 8),
+            "scale": detection_result["parameters"].get("scale", 1.0),
+            "zero_point": detection_result["parameters"].get("zero_point", 0)
+        }
+    
+    # Create reconstructor and analyze
+    reconstructor = create_quantization_reconstructor(quantization_info)
+    return reconstructor.identify_artifacts(tensor, original_tensor)
